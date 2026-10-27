@@ -9,6 +9,7 @@
   -> workflow.py：初始内联、工具循环、预算与压缩续审
       -> materials.py：已捕获材料的索引、分页和字面搜索
       -> context_budget.py：本地估算与输入/输出预算
+  -> report_parsing.py：调用 json-repair 恢复语法，保留报告选择与完整性判断
   -> 原始报告 + report_diagnostics.json + pending adjudication.json
 主 GPT 结合源码和测试核实、修复、验收并记录裁决
 ```
@@ -61,7 +62,9 @@
 
 输出根目录包括 `materials.json`、`workflow.json`、`result.json`、`report.md`，必要时有 `checkpoint.txt`；每次模型调用在独立 `calls/` 子目录保留请求、预算、响应、状态与可用推理日志。仓库模式另有 `sources/`。`response_log.py` 尽力保存收到的 SSE 行和推理文本，针对已知当前 API key 脱敏；这不是任意秘密扫描，记录仍应私有。
 
-`report_diagnostics.py` 只依据已提供或实际捕获的源文本分析，不自行读取模型给出的任意路径。`report_diagnostics.json` 记录字段类型、路径/行号、明确引文的匹配、歧义和 JSON 恢复信息。诊断 `matched` 只说明已记录文本中的匹配，不证明该文本已投递给模型或 Bug 成立；定位缺失、类型问题或歧义不会静默删除发现。可恢复输出与可能丢项必须区分，原始报告不改写。
+`report_parsing.py` 将通用 JSON 语法恢复委托给必装依赖 [json-repair](https://github.com/mangiucugna/json_repair)，不再维护一套引号、逗号或括号修复器。恢复在本地完成，不调用模型；原始响应不改写，恢复报告候选和库返回的修复日志作为派生记录保留。我们自己的代码继续负责顶层报告选择、多报告歧义、可能丢失内容的判断，以及发现和裁决的关联。修复库可能补全结构，因此合法 JSON 不等于完整报告，更不证明发现正确；无法确认的恢复仍保留不完整状态，不把空数组当作通过依据。
+
+`report_diagnostics.py` 只依据已提供或实际捕获的源文本分析，不自行读取模型给出的任意路径。`report_diagnostics.json` 记录字段类型、路径/行号、明确引文的匹配、歧义，以及恢复候选和修复日志。诊断 `matched` 只说明已记录文本中的匹配，不证明该文本已投递给模型或 Bug 成立；定位缺失、类型问题或歧义不会静默删除发现。可恢复输出与可能丢项必须区分。
 
 `adjudication.json` 初始为 pending。主 GPT 核实之后记录 `confirmed`、`dismissed`、`needs_check` 及理由，按顺序 finding ID 关联，并保留更新历史。裁决独立保存，不回灌成第三方审阅输入，也不自动作为合并或验收门禁。批量裁决输入放在已生成输出目录的 `adjudication-input.json`，不放被审源码目录；若确需放在项目内，必须排除取材。
 

@@ -16,8 +16,11 @@
 | --- | --- | --- |
 | Requests | HTTPS 与 SSE 流读取 | [psf/requests](https://github.com/psf/requests) |
 | tzdata | IANA 时区数据 | [python/tzdata](https://github.com/python/tzdata) |
+| json-repair（必需，MIT） | 本地恢复模型报告的 JSON 语法；不执行模型调用 | [mangiucugna/json_repair](https://github.com/mangiucugna/json_repair) |
 | tokenizers（可选） | 本地分词 | [huggingface/tokenizers](https://github.com/huggingface/tokenizers) |
 | Jinja2（可选） | 渲染本地 chat template | [pallets/jinja](https://github.com/pallets/jinja) |
+
+`json-repair` 按 [MIT 许可证](https://github.com/mangiucugna/json_repair/blob/main/LICENSE) 单独分发，由依赖清单安装；本仓库未复制或内嵌其源码。报告选择、完整性诊断和主会话裁决逻辑仍由本项目实现。安装发行版自带的版权和许可文件继续适用，本项目的 Apache-2.0 不替代它们。
 
 ## DeepSeek tokenizer（不随仓库分发）
 

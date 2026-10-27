@@ -45,7 +45,7 @@ python3 -m pip install -r requirements.txt
 cp config.example.json config.json
 ```
 
-后文用 `python` 表示同一个 Python 解释器；macOS/Linux 如使用 `python3`，请相应替换。**安装依赖与 Codex 执行脚本必须使用同一解释器。** 如果使用虚拟环境，先在其中安装依赖，再让 Codex 用该环境的 Python 绝对路径执行此 Skill；不要假定在另一个终端激活环境就会影响桌面 Codex。系统 Python 不允许 pip 安装时，可先用下面的方式创建独立环境，再在后续命令中用其 Python 路径替代 `python`：
+后文用 `python` 表示同一个 Python 解释器；macOS/Linux 如使用 `python3`，请相应替换。**安装依赖与 Codex 执行脚本必须使用同一解释器。** `requirements.txt` 包含报告格式恢复必需的 `json-repair`。如果使用虚拟环境，先在其中安装依赖，再让 Codex 用该环境的 Python 绝对路径执行此 Skill；不要假定在另一个终端激活环境就会影响桌面 Codex。系统 Python 不允许 pip 安装时，可先用下面的方式创建独立环境，再在后续命令中用其 Python 路径替代 `python`：
 
 ```powershell
 python -m venv .venv
@@ -249,12 +249,12 @@ python scripts/review.py --config config.json --repo "/path/to/project" --worksp
 | `report.md`、`result.json`、`workflow.json` | 原始可见报告、解析结果、完成状态与上下文记录 |
 | `calls/` | 每次请求、响应流、可用推理文本和耗时记录 |
 | `sources/index.json`、`sources/source-0001.txt` 等 | 本地源码顺序记录，包括搜索扫描过但未命中的文件 |
-| `report_diagnostics.json` | 派生的字段、定位、证据和 JSON 恢复诊断；保留原始发现 |
+| `report_diagnostics.json` | 派生字段、定位、证据诊断，以及恢复报告候选和修复日志；原始报告单独保留 |
 | `adjudication.json` | 主会话裁决，初始为 pending，不自动代表通过 |
 
 本地来源记录与模型收到的内容不同：搜索可能在本地保留扫描文件全文，却不向模型返回该文件的任何文本。`coverage` 中的索引数量不证明模型已看到或审阅这些文件；诊断 `matched` 只核验实际记录文本，不证明文本已投递或 Bug 成立。
 
-检查 `workflow_status`、`parse_ok`、`completion_warning`、发现、缺失上下文和诊断。定位匹配不证明 Bug 成立，定位缺失或歧义也不会静默删除发现。可能丢失发现的恢复会明确标记。有报告、无发现或请求结束，都不能自动等同于审阅通过；失败与部分报告保留给主会话判断。
+检查 `workflow_status`、`parse_ok`、`completion_warning`、发现、缺失上下文和诊断。通用 JSON 语法恢复交给 [json-repair](https://github.com/mangiucugna/json_repair)，在本地执行，不为格式修复再次请求模型。原始响应、恢复候选和修复日志分开保留；恢复为合法 JSON 不证明报告完整或发现正确。运行器仍负责报告选择、歧义、可能丢失内容的判断和主会话裁决。定位匹配不证明 Bug 成立，定位缺失或歧义也不会静默删除发现。有报告、无发现或请求结束，都不能自动等同于审阅通过；失败与部分报告保留给主会话判断，也不保证所有格式损坏都能恢复。
 
 结合源码和测试证据核实后，可在本地记录裁决，无需另一次模型调用：
 
@@ -312,6 +312,6 @@ Packet 模式仅使用已提供的材料，需要时通过受限快照工具读/
 python -m unittest discover -s scripts -p "test_*.py"
 ```
 
-缺少可选资产时仅跳过两个原生 tokenizer 测试，其余预算、材料、SSE、工作流和台账测试仍运行。CI 同样只跑离线测试。可选 tokenizer 的获取与依赖见 [安装说明](assets/deepseek_v4_tokenizer/README.md)，本仓库不再分发其 JSON，尚未核明再分发条件。
+缺少可选资产或依赖时，原生 tokenizer 检查会跳过；平台专属测试也可能按环境跳过。其余预算、材料、SSE、工作流和台账测试仍运行。CI 同样只跑离线测试。可选 tokenizer 的获取与依赖见 [安装说明](assets/deepseek_v4_tokenizer/README.md)，本仓库不再分发其 JSON，尚未核明再分发条件。
 
 本项目按 [Apache-2.0](LICENSE) 发布；外部依赖见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。这是可直接克隆的 Skill 源码，并非插件商店上架包。

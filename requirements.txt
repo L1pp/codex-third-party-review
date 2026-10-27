@@ -2,3 +2,6 @@
 requests>=2.32.5,<3
 # Supplies IANA time zones on Windows and minimal Python installations.
 tzdata>=2025.2
+
+# Local recovery of malformed model JSON; does not call a model.
+json-repair==0.64.2

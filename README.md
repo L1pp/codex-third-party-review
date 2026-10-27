@@ -47,7 +47,7 @@ python3 -m pip install -r requirements.txt
 cp config.example.json config.json
 ```
 
-The rest of this guide uses `python` for the same interpreter; substitute `python3` where appropriate. **Install dependencies into the interpreter that Codex will use to run the script.** Activating a virtual environment in another terminal does not change a running desktop Codex process.
+The rest of this guide uses `python` for the same interpreter; substitute `python3` where appropriate. **Install dependencies into the interpreter that Codex will use to run the script.** `requirements.txt` includes the required `json-repair` package for local report-format recovery. Activating a virtual environment in another terminal does not change a running desktop Codex process.
 
 If your system Python disallows pip installs, create a virtual environment and use its Python path for the remaining commands:
 
@@ -257,12 +257,12 @@ The terminal prints the absolute output directory. It contains:
 | `report.md`, `result.json`, `workflow.json` | Original visible report, parsed result, workflow completion and context records |
 | `calls/` | Individual request, response-stream, available reasoning, and timing records |
 | `sources/index.json`, `sources/source-0001.txt`, ... | Numbered local source records, including files scanned by a search that returned no match |
-| `report_diagnostics.json` | Derived field, location, evidence, and JSON-recovery diagnostics; original findings are preserved |
+| `report_diagnostics.json` | Derived field, location, and evidence checks, plus the recovered report candidate and repair log; the original report is preserved |
 | `adjudication.json` | Main-session decisions, initially pending; not an automatic approval |
 
 Local source capture is broader than model delivery: a search can retain a scanned file locally while returning no text from it to the model. Indexed source counts in `coverage` do not prove that the model saw or reviewed those files. A diagnostic `matched` result only checks the recorded text, not whether that text was delivered or the bug is real.
 
-Check `workflow_status`, `parse_ok`, `completion_warning`, findings, missing context, and diagnostics. A location match does not prove a bug; a missing or ambiguous match does not silently delete the finding. Recovery that may lose findings is marked accordingly. A returned report, an empty findings list, or a finished request does not automatically mean the code passed review. Retain failures and partial reports for the main session to assess.
+Check `workflow_status`, `parse_ok`, `completion_warning`, findings, missing context, and diagnostics. Report syntax recovery uses [json-repair](https://github.com/mangiucugna/json_repair) locally without another model request. The original response, recovered candidate, and repair log remain separate; a syntactically valid recovery does not establish completeness or correctness. The runtime retains report selection, ambiguity, possible-loss checks, and main-session adjudication. A location match does not prove a bug; a missing or ambiguous match does not silently delete the finding. A returned report, an empty findings list, or a finished request does not automatically mean the code passed review. Retain failures and partial reports for the main session to assess; not every malformed response can be recovered.
 
 After checking a finding against the source and test evidence, record a decision locally without another model call:
 
@@ -320,6 +320,6 @@ Offline tests need no API key, Bailian CLI, or tokenizer downloads:
 python -m unittest discover -s scripts -p "test_*.py"
 ```
 
-Only two native-tokenizer tests are skipped when optional assets or dependencies are absent; budget, materials, SSE, workflow, and ledger tests still run. CI runs offline tests as well. See [optional tokenizer installation (Chinese)](assets/deepseek_v4_tokenizer/README.md). Tokenizer JSON is not redistributed because its redistribution terms have not been established.
+Native-tokenizer checks are skipped when optional assets or dependencies are absent; platform-specific tests may also be skipped. Budget, materials, SSE, workflow, and ledger tests still run. CI runs offline tests as well. See [optional tokenizer installation (Chinese)](assets/deepseek_v4_tokenizer/README.md). Tokenizer JSON is not redistributed because its redistribution terms have not been established.
 
 Licensed under [Apache-2.0](LICENSE); external components are described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This is a directly cloneable Skill source repository, not a published plugin-store package.

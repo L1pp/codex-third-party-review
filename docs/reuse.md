@@ -31,6 +31,12 @@ python scripts/bailian_catalog.py lookup --model deepseek-v4.1-flash-1017
 
 可直接复用的是官方公共目录与现有凭据配置；SSE 换行边界处理作为实现参考并加入真实解码器回归。仓库自动取材、只读探索、90% 压缩续审、完整响应归档、诊断和轻量台账继续由 Python 运行时负责。以后官方 CLI 若提供完整机器可读流事件，再评估收敛请求层；这不是对未来版本能力的判断。
 
+## 通用 JSON 修复
+
+报告语法恢复直接依赖 [json-repair](https://github.com/mangiucugna/json_repair)，由 `requirements.txt` 安装，采用其 [MIT 许可证](https://github.com/mangiucugna/json_repair/blob/main/LICENSE)。本仓库不复制或内嵌该包源码；通用格式恢复交给上游库维护。适配层使用该库内部的单值 `JSONParser` 和读取位置，分别保留独立报告，避免顶层合并或去重；因此依赖固定为 `json-repair==0.64.2`，升级时应运行既有离线回归核对接口与恢复行为。安装和更新时须用执行 Skill 的同一 Python 重新安装依赖。
+
+适配层只保留本项目的业务边界：选择顶层审阅报告、保留歧义和可能丢失的内容、关联发现与主 GPT 裁决。原始报告、恢复候选和修复日志分开保存；恢复不触发模型调用，也不会因库返回了合法 JSON 便认定报告完整或审阅通过。不使用 schema 引导恢复去补造发现的业务字段，也不承诺能恢复所有损坏输入。
+
 ## 仓库取材与报告诊断的参考
 
 仓库模式采用自动取材加只读探索，快照改为记录实际读到的内容；旧 packet 模式继续用于材料限定和回放。此调整保留现有 Python 请求、预算和日志层。

@@ -211,8 +211,10 @@ class ReportDiagnosticsTests(unittest.TestCase):
         result = diagnostics.analyze_report(content)
         self.assertEqual(result["parse_status"], "partial")
         self.assertTrue(result["possible_loss"])
-        self.assertEqual(result["recovered_findings"], [finding()])
-        self.assertEqual(len(result["findings"]), 1)
+        self.assertEqual(result["recovered_findings"][0], finding())
+        self.assertEqual(len(result["findings"]), 2)
+        self.assertEqual(result["findings"][1]["recovery_integrity"], "unverified")
+        self.assertFalse(result["findings"][1]["fields"]["valid"])
 
     def test_unclosed_wrapper_is_not_complete_even_when_array_closed(self):
         content = '{"findings":[' + json.dumps(finding()) + ']'

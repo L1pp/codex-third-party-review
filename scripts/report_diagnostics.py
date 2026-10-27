@@ -23,210 +23,10 @@ def _utc():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _findings(value):
-    items = value if isinstance(value, list) else value.get("findings") if isinstance(value, dict) else None
-    return items if isinstance(items, list) else None
-
-
-def _embedded_findings(value):
-    """An incidental scalar array in prose is not an independent report.
-
-    Whole JSON arrays remain accepted, including invalid elements which need
-    field diagnostics. An explicit findings object is also unambiguous about
-    its purpose even when its elements are not objects.
-    """
-    items = _findings(value)
-    if isinstance(value, list) and value and not any(isinstance(item, dict) for item in value):
-        return None
-    return items
-
-
-def _trailing_commas(text):
-    out = []
-    quoted = escaped = False
-    for index, char in enumerate(text):
-        if quoted:
-            out.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                quoted = False
-            continue
-        if char == '"':
-            quoted = True
-        if char == ",":
-            following = index + 1
-            while following < len(text) and text[following].isspace():
-                following += 1
-            if following < len(text) and text[following] in "]}":
-                continue
-        out.append(char)
-    return "".join(out)
-
-
-def _containers(text):
-    """Yield outer object/array candidates, never their nested report-shaped data."""
-    index = 0
-    quoted = escaped = False
-    while index < len(text):
-        char = text[index]
-        if quoted:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                quoted = False
-            index += 1
-            continue
-        if char == '"':
-            quoted = True
-            index += 1
-            continue
-        if char not in "[{":
-            index += 1
-            continue
-        start = index
-        closers = []
-        in_string = slash = False
-        while index < len(text):
-            char = text[index]
-            if in_string:
-                if slash:
-                    slash = False
-                elif char == "\\":
-                    slash = True
-                elif char == '"':
-                    in_string = False
-            elif char == '"':
-                in_string = True
-            elif char in "[{":
-                closers.append("]" if char == "[" else "}")
-            elif char in "]}":
-                if not closers or char != closers.pop():
-                    index += 1
-                    break
-                if not closers:
-                    index += 1
-                    break
-            index += 1
-        yield text[start:index], not closers and not in_string
-
-
-def _partial_findings(text):
-    """Keep only complete array elements; the caller always labels this partial."""
-    decoder = json.JSONDecoder()
-    text = text.lstrip()
-    if text.startswith("["):
-        start = 1
-    elif text.startswith("{"):
-        start = None
-        depth = 0
-        index = 0
-        while index < len(text):
-            char = text[index]
-            if char == '"':
-                try:
-                    key, end = decoder.raw_decode(text, index)
-                except ValueError:
-                    break
-                rest = text[end:].lstrip()
-                if depth == 1 and key == "findings" and rest.startswith(":"):
-                    value = end + len(text[end:]) - len(rest) + 1
-                    while value < len(text) and text[value].isspace():
-                        value += 1
-                    if value < len(text) and text[value] == "[":
-                        start = value + 1
-                        break
-                    # The key identifies a report even when its first array
-                    # element (or opening bracket) never arrived.
-                    return []
-                index = end
-                continue
-            if char in "[{":
-                depth += 1
-            elif char in "]}":
-                depth -= 1
-            index += 1
-        if start is None:
-            return None
-    else:
-        return None
-    items = []
-    position = start
-    while position < len(text):
-        while position < len(text) and text[position].isspace():
-            position += 1
-        if position >= len(text) or text[position] == "]":
-            break
-        try:
-            item, end = decoder.raw_decode(text, position)
-        except ValueError:
-            break
-        items.append(item)
-        position = end
-        while position < len(text) and text[position].isspace():
-            position += 1
-        if position >= len(text) or text[position] != ",":
-            break
-        position += 1
-    return items
-
-
-def _parse(content):
-    if not isinstance(content, str) or not content.strip():
-        return {"parse_status": "invalid", "possible_loss": True, "warnings": ["No visible report text is available."]}
-    text = content.strip()
-    try:
-        value = json.loads(text)
-        if _findings(value) is not None:
-            return {"parse_status": "valid", "possible_loss": False, "warnings": [], "recovered_report": value}
-        return {"parse_status": "invalid", "possible_loss": True, "warnings": ["JSON is not a findings report."]}
-    except ValueError:
-        pass
-    candidates = []
-    unreadable = []
-    containers = list(_containers(text))
-    if not containers:
-        # Prose can contain an unmatched quote before an otherwise complete
-        # line-start JSON report. Only retry when no outer container was seen:
-        # never promote nested data in a malformed outer object to a report.
-        start = re.search(r"(?m)^[ \t]*[\[{]", text)
-        if start is not None:
-            containers = list(_containers(text[start.start():]))
-    for original, closed in containers:
-        try:
-            value = json.loads(_trailing_commas(original))
-        except ValueError:
-            items = _partial_findings(_trailing_commas(original))
-            if items is not None and (not original.lstrip().startswith("[") or not items
-                                      or any(isinstance(item, dict) for item in items)):
-                if items:
-                    candidates.append(({'findings': items}, True))
-                else:
-                    unreadable.append(original)
-            continue
-        if _embedded_findings(value) is not None:
-            candidates.append((value, not closed))
-        elif isinstance(value, dict) and "findings" in value:
-            unreadable.append(original)
-    if len(candidates) > 1:
-        return {"parse_status": "ambiguous", "possible_loss": True,
-                "warnings": ["Multiple independent findings reports were found; none was selected."],
-                "candidates": [value for value, _ in candidates], "unreadable_candidates": unreadable}
-    if not candidates:
-        return {"parse_status": "partial" if unreadable else "invalid", "possible_loss": True,
-                "warnings": ["No findings report could be recovered without guessing."],
-                "unreadable_candidates": unreadable}
-    value, partial = candidates[0]
-    partial = partial or bool(unreadable)
-    return {"parse_status": "partial" if partial else "recovered", "possible_loss": partial,
-            "unreadable_candidates": unreadable,
-            "warnings": ["The report is incomplete or contains unreadable findings; recovered items are partial."] if partial else
-                        ["A report was recovered from formatting or trailing-comma errors."],
-            "recovered_report": value}
+try:
+    from .report_parsing import findings_from as _findings, parse_report_text
+except ImportError:
+    from report_parsing import findings_from as _findings, parse_report_text
 
 
 def _path(value):
@@ -349,7 +149,7 @@ def _location_candidates(finding, candidates):
 
 def analyze_report(content, findings=None, sources=()):
     """Return derived diagnostics; no finding, source, or original text is mutated."""
-    result = _parse(content)
+    result = parse_report_text(content)
     recovered = _findings(result.get("recovered_report"))
     if recovered is not None:
         result["recovered_findings"] = copy.deepcopy(recovered)
@@ -362,7 +162,8 @@ def analyze_report(content, findings=None, sources=()):
     source_items = list(sources)
     for index, finding in enumerate(chosen, 1):
         records.append({"id": "finding-%04d" % index, "original": copy.deepcopy(finding),
-                        "fields": _field_diagnostics(finding), "location": _location(finding, source_items)})
+                        "fields": _field_diagnostics(finding), "location": _location(finding, source_items),
+                        "recovery_integrity": result["recovery_integrity"]})
     result["findings"] = records
     result["verification_scope"] = "Supplied/read text and structural checks only; diagnostic matches do not establish a real defect."
     return result

@@ -258,6 +258,9 @@ def _finish_details(result):
 def _save_outputs(root, workflow, final_result, material_count, tool_trace, read_sources,
                   started_utc, source_store=None):
     diagnostic_files = {}
+    report_summary = None
+    recovered_report = None
+    recovered_findings = None
     try:
         try:
             from .report_diagnostics import analyze_report, save_diagnostics
@@ -278,6 +281,19 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
             )
         )
         save_diagnostics(root, diagnostics)
+        recovered_report = diagnostics.get("recovered_report")
+        recovered_findings = diagnostics.get("recovered_findings")
+        report_summary = {
+            "request_status": (final_result or {}).get("status"),
+            "finish_reason": (final_result or {}).get("finish_reason"),
+            "stream_done": (final_result or {}).get("stream_done"),
+            "parse_status": diagnostics.get("parse_status"),
+            "raw_parse_ok": diagnostics.get("parse_status") == "valid",
+            "retained_findings": len(diagnostics.get("findings", [])),
+            "possible_loss": bool(diagnostics.get("possible_loss")),
+            "recovery_counts": diagnostics.get("counts", {}),
+            "adjudication_status_at_creation": "pending",
+        }
         diagnostic_files = {
             "report_diagnostics_file": str((root / "report_diagnostics.json").resolve()),
             "adjudication_file": str((root / "adjudication.json").resolve()),
@@ -353,9 +369,11 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
         "uncompleted_reason": workflow.get("uncompleted_reason"),
         "content": content,
         "content_is_partial": workflow["content_is_partial"],
-        "parsed_report": (final_result or {}).get("parsed_report"),
-        "parsed_findings": (final_result or {}).get("parsed_findings"),
-        "parse_ok": bool((final_result or {}).get("parse_ok")),
+        "parsed_report": recovered_report if recovered_report is not None else (final_result or {}).get("parsed_report"),
+        "parsed_findings": recovered_findings if recovered_findings is not None else (final_result or {}).get("parsed_findings"),
+        "parse_ok": bool((final_result or {}).get("parse_ok")) and not (report_summary or {}).get("possible_loss", False),
+        "raw_parse_ok": (report_summary or {}).get("raw_parse_ok", False),
+        "report_summary": report_summary,
         **diagnostic_files,
         "report_diagnostics_warning": workflow.get("report_diagnostics_warning"),
         "repository": workflow.get("repository"),
@@ -375,6 +393,7 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
         "content_is_partial": result["content_is_partial"],
         "uncompleted_reason": result["uncompleted_reason"],
         "parse_ok": result["parse_ok"],
+        "report_summary": report_summary,
         **diagnostic_files,
         "report_diagnostics_warning": workflow.get("report_diagnostics_warning"),
     }

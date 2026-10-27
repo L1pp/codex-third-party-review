@@ -173,9 +173,10 @@ class RepositoryWorkflowTests(unittest.TestCase):
 
     def test_truncated_second_report_is_preserved_as_incomplete(self):
         content = '{"findings": []}\n{"findings": ['
-        report, findings = review.parse_report(content)
+        with self.assertRaises(ValueError):
+            review.parse_report(content)
         result = self.run_flow(lambda call: dict(self.completed(), content=content,
-                                                parsed_report=report, parsed_findings=findings))
+                                                parse_ok=False))
         self.assertEqual(result["status"], "incomplete")
         self.assertTrue(result["content_is_partial"])
         self.assertEqual(result["content"], content)

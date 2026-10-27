@@ -16,6 +16,7 @@ import requests
 import ledger
 from response_log import ResponseLog
 from bailian_catalog import load_catalog_cache, cache_lookup
+from report_parsing import parse_report_text
 
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config.json"
@@ -210,88 +211,16 @@ def load_credential(config):
 
 
 def parse_report(content):
-    def validate(value):
-        findings = value if isinstance(value, list) else value.get("findings") if isinstance(value, dict) else None
-        if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
-            raise ValueError("Expected findings array or report object containing findings array")
-        return value, findings
-
-    def decode_at(source, start, require_complete=False):
-        try:
-            value, end = json.JSONDecoder().raw_decode(source, start)
-            if require_complete and source[end:].strip():
-                return None
-            return value, end
-        except (ValueError, TypeError):
-            return None
-
-    candidate = content.strip()
-    whole_candidates = [candidate]
-    if candidate.startswith("```"):
-        whole_candidates.append(re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.I))
-        whole_candidates[-1] = re.sub(r"\s*```$", "", whole_candidates[-1])
-    for whole in whole_candidates:
-        try:
-            return validate(json.loads(whole))
-        except (ValueError, TypeError):
-            pass
-
-    # Recover one report embedded in explanatory prose. JSON starts must be at a
-    # line boundary so incidental braces in prose are not treated as reports.
-    candidates = []
-    offset = 0
-    while offset < len(content):
-        line_end = content.find("\n", offset)
-        if line_end < 0:
-            line_end = len(content)
-        line = content[offset:line_end]
-        leading = len(line) - len(line.lstrip())
-        start = offset + leading
-        if start < line_end and content[start] in "[{":
-            decoded = decode_at(content, start)
-            if decoded is not None:
-                value, end = decoded
-                try:
-                    validated = validate(value)
-                    candidates.append((start, end, *validated))
-                except ValueError:
-                    pass
-                # Skip nested object/array lines inside this syntactically
-                # complete JSON value; they are not independent report candidates.
-                offset = content.find("\n", max(end, line_end))
-                if offset < 0:
-                    break
-                offset += 1
-                continue
-        offset = line_end + (line_end < len(content))
-
-    # An unlabelled full fence can contain JSON even when it is surrounded by
-    # prose. Labelled fences are still covered by line-level JSON extraction.
-    fence = re.compile(r"(?ms)^```[ \t]*\r?\n(.*?)^```[ \t]*(?=\r?$)")
-    for match in fence.finditer(content):
-        body = match.group(1)
-        start_in_body = len(body) - len(body.lstrip())
-        decoded = decode_at(body, start_in_body, require_complete=True)
-        if decoded is None:
-            continue
-        value, end_in_body = decoded
-        try:
-            validated = validate(value)
-            start = match.start(1) + start_in_body
-            end = match.start(1) + end_in_body
-            candidates.append((start, end, *validated))
-        except ValueError:
-            pass
-
-    unique = {}
-    for _, _, value, findings in candidates:
-        key = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        unique.setdefault(key, (value, findings))
-    if len(unique) == 1:
-        return next(iter(unique.values()))
-    if len(unique) > 1:
+    """Return one usable report through the shared local-recovery adapter."""
+    parsed = parse_report_text(content)
+    if parsed.get("parse_status") == "ambiguous":
         raise ValueError("Multiple valid findings reports found; cannot select unambiguously")
-    raise ValueError("No valid findings report JSON found")
+    value = parsed.get("recovered_report")
+    findings = value if isinstance(value, list) else value.get("findings") if isinstance(value, dict) else None
+    if (parsed.get("possible_loss") or not isinstance(findings, list)
+            or any(not isinstance(item, dict) for item in findings)):
+        raise ValueError("No valid findings report JSON found")
+    return value, findings
 
 
 def error_details(body, key):
@@ -381,7 +310,7 @@ def write_report(output_dir, result, key):
     content = result.get("content", "")
     metadata = {name: result.get(name) for name in (
         "status", "route", "requested_model", "reported_model", "http_status", "finish_reason",
-        "stream_done", "completion_warning", "parse_ok", "parse_warning", "seconds", "usage", "usage_missing", "reasoning_chars",
+        "stream_done", "completion_warning", "parse_ok", "raw_parse_ok", "report_parse_status", "report_recovery", "parse_warning", "seconds", "usage", "usage_missing", "reasoning_chars",
         "provider_error", "error_type", "error_message", "response_log_files", "response_log_warning",
         "ledger_id", "ledger_warning") if result.get(name) is not None}
     fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", content)), default=0))
@@ -600,10 +529,29 @@ def run_review(config, packet, output_dir, dry_run=False, at=None, task_label=No
         result["usage_missing"] = not bool(result["usage"])
         if not dry_run and result["status"] != "tool_calls":
             try:
-                result["parsed_report"], result["parsed_findings"] = parse_report(result["content"])
-                result["parse_ok"] = True
-            except (ValueError, TypeError):
-                result["parse_warning"] = "Visible report is not valid findings JSON; preserve and review the original text, not an empty findings verdict"
+                parsed = parse_report_text(result["content"])
+                result["report_parse_status"] = parsed["parse_status"]
+                result["raw_parse_ok"] = parsed["parse_status"] == "valid"
+                result["report_recovery"] = {
+                    name: parsed[name] for name in ("repair", "repair_log", "raw_parse_error", "counts", "possible_loss", "warnings",
+                                  "candidates", "unverified_candidates", "unreadable_candidates", "recovery_integrity")
+                    if name in parsed
+                }
+                value = parsed.get("recovered_report")
+                findings = value if isinstance(value, list) else value.get("findings") if isinstance(value, dict) else None
+                if isinstance(findings, list):
+                    result["parsed_report"], result["parsed_findings"] = value, findings
+                    result["parse_ok"] = not parsed.get("possible_loss") and all(isinstance(item, dict) for item in findings)
+                if not result["parse_ok"]:
+                    result["parse_warning"] = "Report is incomplete or ambiguous; available local recovery and original text are preserved for host adjudication"
+                elif parsed["parse_status"] != "valid":
+                    result["parse_warning"] = "Report formatting was recovered locally; original text and repair diagnostics are preserved"
+            except Exception as exc:
+                # Reporting failures must never skip persistence of the raw call.
+                result.update(parse_ok=False, raw_parse_ok=False, report_parse_status="invalid",
+                              parsed_report=None, parsed_findings=None,
+                              report_recovery={"error": type(exc).__name__, "possible_loss": True},
+                              parse_warning="Local report parsing failed; the original response is preserved for host review")
         result = redact(result, key)
         record_call(final=True)
         write_json(output_dir / "result.json", result, key)
