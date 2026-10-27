@@ -1,0 +1,42 @@
+{
+  "timezone": "Asia/Shanghai",
+  "base_url": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+  "credential_file": "~/.bailian/config.json",
+  "credential_profile": "token-plan",
+  "api_key_env": "BAILIAN_TOKEN_PLAN_API_KEY",
+  "context_window_tokens": 1000000,
+  "day": {
+    "start": "08:00",
+    "end": "22:00",
+    "model": "auto",
+    "reasoning_effort": null,
+    "max_tokens": 131072,
+    "output_limit_parameter": "max_tokens",
+    "thinking_budget": 262144,
+    "max_input_tokens": 983616,
+    "max_input_tokens_non_thinking": 991808,
+    "model_limit_assumption": "qwen3.8-flash-or-qwen3.8-max",
+    "combined_output_limit_parameter": "max_completion_tokens",
+    "thinking_budget_parameter": null
+  },
+  "night": {
+    "model": "deepseek-v4.1-flash-1017",
+    "reasoning_effort": "max",
+    "max_tokens": 393216
+  },
+  "connect_timeout_seconds": 30,
+  "read_timeout_seconds": 300,
+  "automatic_retries": 0,
+  "context_management": {
+    "safety_tokens": 2048,
+    "compaction_max_tokens": 16384,
+    "max_model_calls": null,
+    "max_compactions": null,
+    "tool_max_chars": 24000,
+    "tool_max_lines": 250,
+    "auto_output_reserve_tokens": 393216,
+    "compression_trigger_ratio": 0.9,
+    "inline_material_token_limit": 100000
+  },
+  "model_catalog_file": "assets/bailian_catalog_cache.json"
+}

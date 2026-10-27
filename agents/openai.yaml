@@ -1,0 +1,6 @@
+interface:
+  display_name: "额外第三方代码审阅"
+  short_description: "仅对代码及开发变动补充独立审阅，纯文本任务跳过，按本地配置选择模型"
+  default_prompt: "使用 $third-party-code-review 对本次代码或开发变动额外独立审阅，由主会话综合裁决；纯文本或文档任务默认跳过。"
+policy:
+  allow_implicit_invocation: true

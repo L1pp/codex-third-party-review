@@ -1,0 +1,4 @@
+# Runtime and offline tests; no model SDK is required.
+requests>=2.32.5,<3
+# Supplies IANA time zones on Windows and minimal Python installations.
+tzdata>=2025.2

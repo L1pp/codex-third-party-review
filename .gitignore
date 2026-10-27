@@ -1,0 +1,46 @@
+# Local settings and credentials
+config.json
+*.local.json
+.env
+.env.*
+!.env.example
+credentials*.json
+
+# Review packets, provider responses and call metadata are private by default
+logs/
+outputs/
+artifacts/
+reviews/
+.review/
+packet.json
+packet-*.json
+materials.json
+request.json
+token_budget.json
+progress.json
+report.md
+result.json
+workflow.json
+response_stream.jsonl
+response_metadata.json
+response_body.bin
+reasoning.txt
+checkpoint.txt
+*.sqlite3
+*.sqlite3-*
+
+# Local public-catalog cache; refresh explicitly when needed
+assets/bailian_catalog_cache.json
+
+# Optional upstream tokenizer files are installed locally, never vendored
+assets/deepseek_v4_tokenizer/*
+!assets/deepseek_v4_tokenizer/README.md
+
+# Python tooling
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
