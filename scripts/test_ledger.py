@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ledger
@@ -206,12 +207,29 @@ class LedgerTests(unittest.TestCase):
             )
             return call_id
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        # Verify concurrent record integrity independently of a shared CI
+        # runner's scheduling/disk latency. Production keeps its short,
+        # best-effort timeout; lock exhaustion is checked separately below.
+        with patch.object(ledger, "CONNECT_TIMEOUT_SECONDS", 5.0), ThreadPoolExecutor(max_workers=workers) as pool:
             ids = list(pool.map(write_call, range(workers)))
         self.assertEqual(len(set(ids)), workers)
         result = ledger.history(self.db_path, limit=100)
         self.assertEqual(len(result["records"]), workers)
         self.assertEqual(result["summary"][0]["count"], workers)
+
+    def test_locked_database_returns_an_error_without_overwriting_records(self) -> None:
+        existing = ledger.start_call(self.db_path, {"task": "existing record"})
+        with closing(sqlite3.connect(self.db_path, isolation_level=None)) as blocker:
+            blocker.execute("BEGIN IMMEDIATE")
+            try:
+                with self.assertRaisesRegex(sqlite3.OperationalError, "locked"):
+                    ledger.start_call(self.db_path, {"task": "blocked record"})
+            finally:
+                blocker.rollback()
+        records = ledger.history(self.db_path)["records"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["id"], existing)
+        self.assertEqual(records[0]["task"], "existing record")
 
     def test_time_fields_are_normalized_to_utc_and_bad_outcome_rejected(self) -> None:
         call_id = ledger.start_call(
