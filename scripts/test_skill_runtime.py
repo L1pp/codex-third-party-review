@@ -30,7 +30,7 @@ class SkillRuntimeTests(unittest.TestCase):
 
     def test_foreign_interpreter_reexec_preserves_arguments_and_cwd(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary);entry=root/"scripts/review.py";entry.parent.mkdir();entry.touch()
+            root=Path(temporary).resolve();entry=root/"scripts/review.py";entry.parent.mkdir();entry.touch()
             exe=skill_runtime.runtime_python(root);exe.parent.mkdir(parents=True);exe.touch()
             with patch.object(skill_runtime,"using_skill_runtime",return_value=False), \
                     patch.object(skill_runtime.os,"execve",side_effect=RuntimeError("reexec intercepted")) as execute, \
