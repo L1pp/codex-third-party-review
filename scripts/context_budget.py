@@ -346,17 +346,15 @@ def plan_budget(messages, tools, route, config, output_cap=None):
         )
 
     remaining = compression_trigger_tokens - estimate["input_tokens"] - safety_tokens
-    needs_compaction = estimate["input_tokens"] >= compression_trigger_tokens - safety_tokens
-    if split_output_budget and remaining < 2:
-        # Both the generated answer and internal reasoning need room when this
-        # route separates their limits; let workflow compress before retrying.
-        effective_output_tokens = 0
+    # Reserve the complete configured generation budget before a review call.
+    # An input-only trigger could leave just a few thousand reasoning tokens;
+    # compact first instead of sending such a reduced request to the provider.
+    generation_reserve = min(requested_output_tokens, route_output_cap) if route_output_cap is not None else requested_output_tokens
+    output_budget_exceeds_context = generation_reserve >= compression_trigger_tokens - safety_tokens
+    needs_compaction = remaining <= generation_reserve or estimate["input_tokens"] >= compression_trigger_tokens - safety_tokens
+    if split_output_budget and generation_reserve < 2:
         needs_compaction = True
-    else:
-        caps = [requested_output_tokens, remaining]
-        if route_output_cap is not None:
-            caps.append(route_output_cap)
-        effective_output_tokens = max(0, min(caps))
+    effective_output_tokens = 0 if needs_compaction else generation_reserve
 
     if split_output_budget:
         effective_body_tokens, effective_thinking_tokens = _split_output_tokens(
@@ -379,6 +377,9 @@ def plan_budget(messages, tools, route, config, output_cap=None):
         "effective_output_tokens": effective_output_tokens,
         "output_limited_by_context": effective_output_tokens < requested_output_tokens,
         "needs_compaction": needs_compaction,
+        "compaction_reason": ("output_reservation" if remaining <= generation_reserve else "input_trigger") if needs_compaction else None,
+        "output_budget_exceeds_context": output_budget_exceeds_context,
+        "generation_reserve_tokens": generation_reserve,
         "split_output_budget": split_output_budget,
         "requested_body_tokens": body_cap,
         "effective_body_tokens": effective_body_tokens,

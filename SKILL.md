@@ -7,9 +7,9 @@ description: 对代码、测试、依赖、迁移和影响运行行为的配置�
 
 保留正常 GPT 开发、审阅和验收流程；同一主任务由主会话额外运行一次，开发子 Agent 不重复调用。用户明确指定或禁止时遵从用户要求。
 
-1. 以本 `SKILL.md` 实际所在目录定位 `scripts/review.py` 和本地 `config.json`；尚未配置时读 [README.md](README.md)。不要猜测安装位置。
-2. 给出任务仓库、审阅目标、简短需求和已有测试证据，无需逐文件复制源码。默认 `worktree`；仅暂存改动用 `staged`，分支范围用 `range --base <本地ref>`。涉及额外工作区时通过 `--workspace-root` 指定，允许根重叠；`repo` 按目标 Git 视图读取，工作区别名始终读磁盘，核查时区分路径和来源版本。
-3. 遵守宿主项目和平台的命令权限，使用对应 Python 执行：
+1. 以本 `SKILL.md` 实际所在目录定位 `scripts/review.py` 和本地 `config.json`；入口自动使用本 Skill 的独立 `.venv`，安装与配置见 [README.md](README.md)。不要猜测安装位置。
+2. 给出任务仓库、审阅目标、简短需求和已有测试证据，无需逐文件复制源码或准备 packet。省略 `--repo` 时自动使用当前仓库，默认 `worktree`；仅暂存改动用 `staged`，分支范围用 `range --base <本地ref>`。涉及额外工作区时通过 `--workspace-root` 指定，允许根重叠；`repo` 按目标 Git 视图读取，工作区别名始终读磁盘，核查时区分路径和来源版本。
+3. 遵守宿主项目和平台的命令权限执行入口，入口负责切换独立 Python：
 
 ```text
 python "<Skill根目录>/scripts/review.py" --repo "<项目目录>" --target worktree --task "<任务短标题>" --requirement "<必要需求>"
@@ -19,4 +19,4 @@ python "<Skill根目录>/scripts/review.py" --repo "<项目目录>" --target wor
 
 4. 读取输出目录的 `report.md`、`result.json`、`report_diagnostics.json`，核实每项发现后完成正常修复与验收。用 `scripts/report_diagnostics.py --review-dir "<输出目录>" --finding finding-0001 --verdict confirmed --reason "<依据>"` 记录裁决；值可用 `confirmed`、`dismissed`、`needs_check`，多项可用 `--decisions-file "<输出目录>/adjudication-input.json"` 批量记录，裁决输入不要放入被审源码目录，确需放入时必须排除取材；报告无发现时可用 `--note` 写核查说明。来源记录可能包含搜索未命中的本地文件，不等于模型已看过全文；定位诊断不替代投递事实或缺陷判断，保留疑点和原始发现。失败、不完整报告或无发现不自动代表通过；修复后不自动再开独立复审。
 
-需要明确材料集合或回放时，仍可使用 `--packet "<packet.json>" --output-dir "<新目录>"`，此模式只访问已给材料。源码读取版本、请求、响应与可用推理日志本地保留，可能含源码，不随仓库发布。预算、路由、来源记录和裁决格式见 [架构与边界](docs/architecture.md)。
+只有明确要求限定材料集合或回放时，才使用 `--packet "<packet.json>" --output-dir "<新目录>"`，此模式只访问已给材料。源码读取版本、请求、响应与可用推理日志本地保留，可能含源码，不随仓库发布。预算、路由、来源记录和裁决格式见 [架构与边界](docs/architecture.md)。

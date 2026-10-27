@@ -8,7 +8,7 @@ A Codex Skill for supplementary, repository-aware code review through an externa
 
 ## 1. 安装 Skill
 
-需要 **Git、Python 3.10+、可运行本地脚本的 Codex，以及外部模型服务的 API key**。ChatGPT/Codex 的订阅登录不会替代这个外部 API key。本仓库无需先安装百炼 CLI，也无需下载 tokenizer。
+需要 **Git、Python 3.10+、可运行本地脚本的 Codex，以及外部模型服务的 API key**。ChatGPT/Codex 的订阅登录不会替代这个外部 API key。无需先安装百炼 CLI；tokenizer 由环境准备命令下载，也可使用已有本地资产。
 
 以下按首次安装编写，Windows 与 macOS/Linux 选一组。目标目录应尚不存在；已有安装请看文末更新说明，执行某一步报错后先处理错误。
 
@@ -25,7 +25,7 @@ git clone https://github.com/L1pp/codex-third-party-review.git $skillDir
 ```powershell
 Set-Location $skillDir
 python --version
-python -m pip install -r requirements.txt
+python scripts/skill_runtime.py setup --download-official
 Copy-Item config.example.json config.json
 ```
 
@@ -41,21 +41,25 @@ git clone https://github.com/L1pp/codex-third-party-review.git "$HOME/.agents/sk
 ```bash
 cd "$HOME/.agents/skills/third-party-code-review"
 python3 --version
-python3 -m pip install -r requirements.txt
+python3 scripts/skill_runtime.py setup --download-official
 cp config.example.json config.json
 ```
 
-后文用 `python` 表示同一个 Python 解释器；macOS/Linux 如使用 `python3`，请相应替换。**安装依赖与 Codex 执行脚本必须使用同一解释器。** `requirements.txt` 包含报告格式恢复必需的 `json-repair`。如果使用虚拟环境，先在其中安装依赖，再让 Codex 用该环境的 Python 绝对路径执行此 Skill；不要假定在另一个终端激活环境就会影响桌面 Codex。系统 Python 不允许 pip 安装时，可先用下面的方式创建独立环境，再在后续命令中用其 Python 路径替代 `python`：
+安装会在 Skill 自己的 `.venv` 中准备 `json-repair`、原生 `tokenizers`、Jinja2 等依赖，并检查本地官方 tokenizer；不会调用模型或读取密钥。入口会自动切换到这套独立环境，保留项目工作目录，项目虚拟环境无需另装依赖。已有配置、审阅日志和完整 tokenizer 资产保留。
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+已下载官方 tokenizer 时可以使用本地目录：
+
+```text
+python scripts/skill_runtime.py setup --source-dir "<本地 tokenizer 目录>"
 ```
 
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+不加载凭据、不调用模型即可查看实际解释器和计数能力：
+
+```text
+python scripts/review.py --runtime-info
 ```
+
+隔离解释器会忽略继承的 Python 搜索路径和用户级包；这不是操作系统沙箱。
 
 用户级目录 `~/.agents/skills/third-party-code-review/` 可供多个项目使用。只想在一个项目使用，也可把完整仓库放到该项目的 `.agents/skills/third-party-code-review/`。必须保留 `SKILL.md`、`scripts/`、配置示例及支持文件的相对位置，不能只复制 `SKILL.md`。具体发现方式见 [OpenAI 官方 Skill 文档](https://learn.chatgpt.com/docs/build-skills)。未出现在 Skill 列表时，重新打开 Codex。
 
@@ -135,7 +139,7 @@ mkdir -p "$HOME/.config/third-party-code-review"
 
 一次工作流开始时选择路由；同一轮取材或压缩续审跨过边界也不会中途换模型。checkpoint 压缩使用独立的较小输出预算，但不切换已选模型。`auto` 由服务端决定实际路由，本项目不能据此确认背后的模型。表中上限是配置与已知服务适配假设，不是任意账号、任意模型的实时能力保证。
 
-默认上下文为 1,000,000 token，优先内联约 100,000 个本地估算 token 的材料，在 90% 阈值压缩续审。即使初始材料全部内联，仓库探索工具仍可使用，审阅者可以自行查找调用方、契约、配置和相关测试，无需主会话逐文件复制。本地估算不等于服务端 `usage`。缺少可选 tokenizer 时也可运行，详见 [架构与边界](docs/architecture.md)。
+默认上下文为 1,000,000 token，优先内联约 100,000 个本地估算 token 的材料，在预计输入、完整输出预留和安全余量达到 90% 阈值前压缩续审。即使初始材料全部内联，仓库探索工具仍可使用，审阅者可以自行查找调用方、契约、配置和相关测试，无需主会话逐文件复制。本地估算不等于服务端 `usage`。DeepSeek 原生计数依赖由独立运行环境准备，auto 仍明确使用保守估算，详见 [架构与边界](docs/architecture.md)。
 
 **如果不想按时间切换：**修改 `config.json` 中的完整 `day` / `night` 路由，不要只改模型名、却留下另一个模型的思考和输出参数。例如全天使用 DeepSeek 时，用下面的两段替换原有 `day` / `night`，保留其他顶层字段：
 
@@ -200,7 +204,7 @@ python scripts/review.py --config config.json --repo "/path/to/project" --target
 使用 $third-party-code-review 审阅本项目当前改动。自动收集差异和源码上下文，让审阅者只读探索关联文件，最后由主会话核实并裁决发现。
 ```
 
-主会话给运行器项目目录、审阅目标、简短需求和已有测试证据文件，不再手工复制源码到审阅包。如使用独立虚拟环境，同时提供其 Python 绝对路径。
+主会话给运行器项目目录、审阅目标、简短需求和已有测试证据文件，不再手工复制源码到审阅包。入口自动进入 Skill 自己的独立虚拟环境，不需要调用方指定项目 Python 路径。
 
 审阅者可在指定仓库和额外工作区根内列文件、搜索代码、分页读取文本。即使小改动的材料全部内联，这些工具也保留。运行器把实际读到的内容保存为顺序版本，后续读取复用该版本。审阅工具不执行命令、不修改代码、不运行测试；主会话继续按宿主项目与平台权限规则负责修改和验收。
 
@@ -298,13 +302,13 @@ python scripts/review.py --config config.json --history --outcome success --slow
 python scripts/review.py --config config.json --packet packet.json --output-dir outputs/packet-dry-run-001 --dry-run
 ```
 
-Packet 模式仅使用已提供的材料，需要时通过受限快照工具读/搜，不发现额外仓库文件。它仍要求新的显式 `--output-dir`，重复运行请更换目录。去掉 `--dry-run` 即为真实 API 调用，需要凭据；日常希望审阅者寻找额外上下文时使用仓库模式。
+Packet 模式仅使用已提供的材料，需要时通过受限快照工具读/搜，不发现额外仓库文件。它仍要求新的显式 `--output-dir`，重复运行请更换目录。去掉 `--dry-run` 即为真实 API 调用，需要凭据；日常使用仓库模式；省略 `--repo` 和 `--packet` 时自动探索当前工作目录的 Git 仓库。
 
 ## 日志、更新与开发
 
 真实调用默认本地保存初始材料、探索读到的源码版本、请求、响应流、可用推理文本、诊断、裁决和结果，可能含源码或私有路径。已知当前 API key 会尽力脱敏，但这不是任意秘密检测；日志不能因此视为可公开。`config.json`、常见输出、packet、日志、台账和 tokenizer JSON 已被 Git 忽略；自定义输出目录中的源码记录和裁决也应保持私有，不要强制添加或分享。
 
-更新已克隆的 Skill 时，在该目录执行 `git pull --ff-only`，随后用同一 Python 再执行 `python -m pip install -r requirements.txt`。**不要重新复制示例覆盖个人 `config.json`。** 新版本如增加配置字段，请对照示例手动合并。
+更新已克隆的 Skill 时，在该目录执行 `git pull --ff-only`，随后用同一 Python 再执行 `python scripts/skill_runtime.py setup --download-official`。**不要重新复制示例覆盖个人 `config.json`。** 新版本如增加配置字段，请对照示例手动合并。
 
 离线测试无需 API key、百炼 CLI 或 tokenizer 下载：
 
@@ -312,6 +316,6 @@ Packet 模式仅使用已提供的材料，需要时通过受限快照工具读/
 python -m unittest discover -s scripts -p "test_*.py"
 ```
 
-缺少可选资产或依赖时，原生 tokenizer 检查会跳过；平台专属测试也可能按环境跳过。其余预算、材料、SSE、工作流和台账测试仍运行。CI 同样只跑离线测试。可选 tokenizer 的获取与依赖见 [安装说明](assets/deepseek_v4_tokenizer/README.md)，本仓库不再分发其 JSON，尚未核明再分发条件。
+标准安装会执行原生 tokenizer 检查；仅平台专属测试按环境跳过。CI 在独立环境中准备依赖和官方资产，然后只运行离线测试，不调用模型。tokenizer 的获取与依赖见 [安装说明](assets/deepseek_v4_tokenizer/README.md)，本仓库不再分发其 JSON，尚未核明再分发条件。
 
 本项目按 [Apache-2.0](LICENSE) 发布；外部依赖见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。这是可直接克隆的 Skill 源码，并非插件商店上架包。

@@ -206,11 +206,12 @@ class ContextBudgetTests(unittest.TestCase):
             output_cap=20,
         )
         self.assertEqual(limited["remaining_tokens"], 10)
-        self.assertEqual(limited["effective_output_tokens"], 10)
+        self.assertEqual(limited["effective_output_tokens"], 0)
         self.assertTrue(limited["output_limited_by_context"])
-        self.assertFalse(limited["needs_compaction"])
+        self.assertTrue(limited["needs_compaction"])
+        self.assertEqual(limited["generation_reserve_tokens"], 20)
 
-    def test_89_percent_input_limits_output_without_triggering_compaction(self):
+    def test_output_reservation_compacts_instead_of_sending_tiny_output(self):
         context_limit = 10_000
         base = context_budget.estimate_tokens([{"role": "user", "content": ""}], [], "auto")["input_tokens"]
         target_input = 8_900
@@ -223,9 +224,10 @@ class ContextBudgetTests(unittest.TestCase):
         self.assertEqual(result["input_tokens"], target_input)
         self.assertEqual(result["compression_trigger_tokens"], 9_000)
         self.assertEqual(result["compression_trigger_ratio"], 0.9)
-        self.assertEqual(result["effective_output_tokens"], 90)
+        self.assertEqual(result["effective_output_tokens"], 0)
         self.assertTrue(result["output_limited_by_context"])
-        self.assertFalse(result["needs_compaction"])
+        self.assertTrue(result["needs_compaction"])
+        self.assertEqual(result["generation_reserve_tokens"], 384)
 
     def test_90_percent_threshold_triggers_compaction_and_ratio_is_configurable(self):
         base = context_budget.estimate_tokens([{"role": "user", "content": ""}], [], "auto")["input_tokens"]

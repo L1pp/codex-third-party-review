@@ -521,7 +521,12 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
 
     def budget_for(request_messages, request_tools, request_route, output_cap=None):
         try:
-            return plan_budget(request_messages, request_tools, request_route, config, output_cap=output_cap)
+            planned = plan_budget(request_messages, request_tools, request_route, config, output_cap=output_cap)
+            if planned.get("output_budget_exceeds_context"):
+                raise WorkflowError("Configured output budget cannot fit even an empty context; choose compatible context/output settings")
+            return planned
+        except WorkflowError:
+            raise
         except Exception as exc:
             raise WorkflowError("Context token estimation unavailable (%s)" % type(exc).__name__) from None
 
@@ -896,6 +901,9 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
         except WorkflowError as exc:
             workflow.update(status="error", uncompleted_reason=str(exc))
             return _save_outputs(root, workflow, None, len(store.index()), tool_trace, read_sources, started_utc, source_store=store)
+        if initial_budget.get("needs_compaction"):
+            workflow.update(status="incomplete", uncompleted_reason="Initial request cannot fit its complete output reservation; no request was sent")
+            return _save_outputs(root, workflow, None, len(store.index()), tool_trace, read_sources, started_utc, source_store=store)
         initial_route = _review_route_with_budget(route, initial_budget)
         call = do_call("review", messages, tools, initial_route, initial_budget)
         if call is None:
@@ -918,7 +926,7 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
                 checkpoint = checkpoint_from_messages(messages)
                 if shrink_inline_context(budget, checkpoint=checkpoint):
                     continue
-            fresh_messages = compact_checkpoint(messages, "history_budget")
+            fresh_messages = compact_checkpoint(messages, budget.get("compaction_reason") or "history_budget")
             if fresh_messages is None:
                 workflow["status"] = "incomplete"
                 break

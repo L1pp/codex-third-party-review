@@ -31,3 +31,5 @@ python -m unittest discover -s scripts -p "test_context_primitives.py"
 ```
 
 两个原生 tokenizer 专属测试仅在依赖或资产缺失时 skip；已存在但损坏/不兼容的资产会使这两个测试失败，以便发现问题。fallback 和预算测试不因缺少资产跳过。CI 默认不下载、不安装本目录中的 JSON。
+
+标准 Skill 安装通过 `python scripts/skill_runtime.py setup --download-official` 准备独立运行环境和本目录资产；已下载时用 `--source-dir`。模型调用入口会自动进入该环境，无需在每个项目里安装 tokenizer 依赖。

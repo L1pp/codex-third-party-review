@@ -56,3 +56,5 @@ python scripts/bailian_catalog.py lookup --model deepseek-v4.1-flash-1017
 - 依赖清单和 CI 定义。
 
 不包含 API key、个人 `config.json`、审阅包、请求/响应日志、台账数据库，也不包含 DeepSeek tokenizer JSON。用户本机自行安装的官方 CLI 与可选资产继续适用各自的许可证、服务条款和账户规则；本项目的 Apache-2.0 不会重新许可这些内容。
+
+独立运行环境通过 Python 标准库 `venv` 创建，原生计数复用 `tokenizers` 和官方 JSON/模板，不执行下载目录中的上游 Python 代码。运行环境不进入 Git；依赖和本地资产的准备不调用模型。

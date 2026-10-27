@@ -10,7 +10,7 @@ This Skill does not change Codex's main model configuration. A completed report 
 
 ## 1. Install the Skill
 
-You need **Git, Python 3.10+, Codex with permission to run local scripts, and an API key for the external model service**. Your ChatGPT/Codex subscription sign-in does not supply that external API key. The Bailian CLI and tokenizer assets are optional.
+You need **Git, Python 3.10+, Codex with permission to run local scripts, and an API key for the external model service**. Your ChatGPT/Codex subscription sign-in does not supply that external API key. The Bailian CLI is optional. The dedicated runtime includes the native DeepSeek tokenizer dependencies; setup installs the two official JSON assets locally.
 
 Choose the instructions for your platform. These commands are for a **new installation**: the destination must not already exist. If a step fails, resolve the error before continuing. For an existing installation, see the update instructions at the end.
 
@@ -27,7 +27,7 @@ After cloning successfully:
 ```powershell
 Set-Location $skillDir
 python --version
-python -m pip install -r requirements.txt
+python scripts/skill_runtime.py setup --download-official
 Copy-Item config.example.json config.json
 ```
 
@@ -43,25 +43,25 @@ After cloning successfully:
 ```bash
 cd "$HOME/.agents/skills/third-party-code-review"
 python3 --version
-python3 -m pip install -r requirements.txt
+python3 scripts/skill_runtime.py setup --download-official
 cp config.example.json config.json
 ```
 
-The rest of this guide uses `python` for the same interpreter; substitute `python3` where appropriate. **Install dependencies into the interpreter that Codex will use to run the script.** `requirements.txt` includes the required `json-repair` package for local report-format recovery. Activating a virtual environment in another terminal does not change a running desktop Codex process.
+The rest of this guide uses `python`; substitute `python3` where appropriate. Setup creates this Skill's own `.venv`, installs its runtime dependencies (including `json-repair`, `tokenizers`, and Jinja2), and checks the local official tokenizer. It does not call a model or read API credentials. Existing configuration, review logs, and complete tokenizer assets remain in place.
 
-If your system Python disallows pip installs, create a virtual environment and use its Python path for the remaining commands:
+If you already downloaded the official assets, setup can use them without downloading the archive again:
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```text
+python scripts/skill_runtime.py setup --source-dir "<local tokenizer directory>"
 ```
 
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-```
+The `review.py` and adjudication CLI automatically re-enter the Skill's isolated Python, even when Codex starts them with a project's Python. They retain the project's working directory and use the Skill's dependencies. No activation or dependency installation in individual projects is needed. The bootstrap ignores inherited Python import paths and user-site packages; this is interpreter isolation, not an operating-system sandbox.
 
-Tell Codex to execute this Skill with that environment's **absolute Python path**. You do not need to activate it if you use the executable directly.
+Check the active runtime without loading credentials or calling a model:
+
+```text
+python scripts/review.py --runtime-info
+```
 
 The user-level directory `~/.agents/skills/third-party-code-review/` makes the Skill available across projects. For one project only, place the complete repository at that project's `.agents/skills/third-party-code-review/`. Keep the relative layout of `SKILL.md`, `scripts/`, configuration examples, and supporting files; copying only `SKILL.md` is insufficient. See the [official OpenAI Skill documentation](https://learn.chatgpt.com/docs/build-skills). If the Skill does not appear, reopen Codex.
 
@@ -143,7 +143,7 @@ The default configuration uses **Asia/Shanghai (Beijing time)**, independently o
 
 The route is selected once at the start of a workflow. Material reads or checkpoint continuations do not switch models if the time crosses a boundary. Checkpoint compaction uses a separate, smaller output budget without switching the selected model. The provider selects the underlying model for `auto`; this project cannot identify it from that name. These limits describe configuration and service-adapter assumptions, not a live capability guarantee for every account or model.
 
-Defaults: a 1,000,000-token context window, approximately 100,000 locally estimated material tokens sent inline, and checkpoint compaction at a 90% threshold. Repository exploration remains available even when all initial materials fit inline; the model can look for callers, contracts, configuration, and relevant tests without the main session copying each file. Local estimates are not the provider's `usage`. Missing optional tokenizer assets do not prevent operation. See [architecture and boundaries (Chinese)](docs/architecture.md).
+Defaults: a 1,000,000-token context window, approximately 100,000 locally estimated material tokens sent inline, and checkpoint compaction before the estimated input plus reserved output reaches the 90% threshold. Repository exploration remains available even when all initial materials fit inline; the model can look for callers, contracts, configuration, and relevant tests without the main session copying each file. Local estimates are not the provider's `usage`. The dedicated CLI checks native DeepSeek tokenizer readiness before any request. See [architecture and boundaries (Chinese)](docs/architecture.md).
 
 **To use one model all day:** replace the complete `day` and `night` route objects, rather than changing only the model name and retaining another model's reasoning/output parameters. For example, replace both route objects with the following to use DeepSeek throughout the day; retain every other top-level configuration field:
 
@@ -208,7 +208,7 @@ Once the Skill is installed and credentials are configured, enter this in your d
 Use $third-party-code-review to review this project's current changes. Automatically collect the diff and source context, let the reviewer inspect related files, and have the main session verify and adjudicate its findings.
 ```
 
-The main session gives the runtime the repository, target, short requirements, and any existing test-evidence file. It no longer needs to copy source into a review packet. If you use a virtual environment, also supply its absolute Python path.
+The main session gives the runtime the repository, target, short requirements, and any existing test-evidence file. It no longer needs to copy source into a review packet. The entry point automatically uses the Skill runtime; individual project interpreters need no extra dependencies.
 
 The reviewer can list files, search code, and read paginated text within the selected repository and any supplied workspace roots. These tools remain available even for a small change that was fully inlined. The runtime records the content actually read as numbered source versions; subsequent reads reuse that version. Review-time reads do not execute commands, modify code, or run tests. The main session remains responsible for changes and testing under the host project's and platform's permission rules.
 
@@ -306,13 +306,13 @@ For an explicitly selected material set or offline replay, prepare a private `pa
 python scripts/review.py --config config.json --packet packet.json --output-dir outputs/packet-dry-run-001 --dry-run
 ```
 
-Packet mode uses only the supplied materials, with bounded snapshot read/search tools when needed. It does not discover additional repository files. It still requires a new explicit `--output-dir`; use a different directory on each run. Removing `--dry-run` makes a real API request and requires credentials. Repository mode is the normal entry point when you want the reviewer to find additional context.
+Packet mode uses only the supplied materials, with bounded snapshot read/search tools when needed. It does not discover additional repository files. It still requires a new explicit `--output-dir`; use a different directory on each run. Removing `--dry-run` makes a real API request and requires credentials. Repository mode is the normal entry point; omitting both `--repo` and `--packet` explores the current Git working directory.
 
 ## Logs, updates, and development
 
 Real calls retain collected materials, explored source versions, requests, response streams, available reasoning text, diagnostics, decisions, and results locally. These can contain source code or private paths. The known current API key is redacted where possible; this is not a general secret scanner and does not make logs safe to publish. Git ignores local configuration, common output directories, packets, logs, the ledger, and tokenizer JSON. Keep all review output directories, including source captures and adjudication records, private even if you choose a custom location. Do not force-add or share them.
 
-To update a cloned installation, run `git pull --ff-only` in its directory, then install dependencies again with the same interpreter using `python -m pip install -r requirements.txt`. **Do not overwrite your personal `config.json` by copying the example again.** Compare new configuration fields and merge them manually if needed.
+To update a cloned installation, run `git pull --ff-only` in its directory, then refresh the dedicated runtime using `python scripts/skill_runtime.py setup --download-official`. **Do not overwrite your personal `config.json` by copying the example again.** Compare new configuration fields and merge them manually if needed.
 
 Offline tests need no API key, Bailian CLI, or tokenizer downloads:
 
@@ -320,6 +320,6 @@ Offline tests need no API key, Bailian CLI, or tokenizer downloads:
 python -m unittest discover -s scripts -p "test_*.py"
 ```
 
-Native-tokenizer checks are skipped when optional assets or dependencies are absent; platform-specific tests may also be skipped. Budget, materials, SSE, workflow, and ledger tests still run. CI runs offline tests as well. See [optional tokenizer installation (Chinese)](assets/deepseek_v4_tokenizer/README.md). Tokenizer JSON is not redistributed because its redistribution terms have not been established.
+Standard setup runs native-tokenizer checks; platform-specific tests may still be skipped. CI prepares the isolated runtime and official tokenizer assets, then runs offline tests without model calls. See [tokenizer installation (Chinese)](assets/deepseek_v4_tokenizer/README.md). Tokenizer JSON is not redistributed because its redistribution terms have not been established.
 
 Licensed under [Apache-2.0](LICENSE); external components are described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This is a directly cloneable Skill source repository, not a published plugin-store package.

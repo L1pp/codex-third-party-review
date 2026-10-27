@@ -11,6 +11,13 @@ import time
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+# Re-enter the Skill runtime before importing caller-environment dependencies.
+if __name__ == "__main__":
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from skill_runtime import launch_in_runtime
+    launch_in_runtime(__file__, require_tokenizer=True)
+
 import requests
 
 import ledger
@@ -351,6 +358,7 @@ def run_review(config, packet, output_dir, dry_run=False, at=None, task_label=No
     output_dir.mkdir(parents=True, exist_ok=False)
     result = {
         "route": route, "requested_model": route["model"], "reported_model": None,
+        "runtime": __import__("skill_runtime").runtime_info(),
         "started_utc": datetime.now(timezone.utc).isoformat(), "status": "dry_run" if dry_run else "requesting",
         "http_status": None, "finish_reason": None, "stream_done": False,
         "content": "", "parsed_report": None, "parsed_findings": None, "parse_ok": False,
@@ -580,13 +588,18 @@ def main(argv=None):
     offline.add_argument("--route-only", action="store_true")
     offline.add_argument("--dry-run", action="store_true")
     offline.add_argument("--history", action="store_true", help="Read local call history and timing statistics; no credentials or network")
+    offline.add_argument("--runtime-info", action="store_true", help="Show interpreter and tokenizer readiness without credentials or network")
     parser.add_argument("--at", help="Offline only: ISO datetime; missing offset means configured local time")
     args = parser.parse_args(argv)
+    if args.runtime_info:
+        from skill_runtime import runtime_info, check_runtime
+        print(json.dumps(dict(runtime_info(), capabilities=check_runtime()), ensure_ascii=False))
+        return 0
     if args.at and not (args.route_only or args.dry_run):
         parser.error("--at is available only with --route-only or --dry-run")
-    reviewing = not (args.route_only or args.history)
+    reviewing = not (args.route_only or args.history or args.runtime_info)
     if reviewing and args.repo is None and args.packet is None:
-        parser.error("--repo or --packet is required")
+        args.repo = Path.cwd()
     if reviewing and args.packet is not None and args.output_dir is None:
         parser.error("packet mode requires a new --output-dir")
     if reviewing and args.repo is None and (args.target != "worktree" or args.base or args.workspace_root or args.requirement or args.test_evidence):

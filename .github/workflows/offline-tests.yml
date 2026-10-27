@@ -34,7 +34,7 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: requirements*.txt
-      - name: Install runtime dependencies
-        run: python -m pip install -r requirements.txt
-      - name: Run offline unit tests without model credentials or tokenizer downloads
-        run: python -m unittest discover -s scripts -p "test_*.py" -v
+      - name: Prepare isolated Skill runtime and official tokenizer assets
+        run: python scripts/skill_runtime.py setup --download-official
+      - name: Run offline unit tests without model calls
+        run: python scripts/skill_runtime.py test

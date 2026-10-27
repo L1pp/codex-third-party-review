@@ -151,7 +151,7 @@ class ReviewTests(unittest.TestCase):
     def test_real_budget_to_route_to_payload_keeps_both_models_within_context(self):
         import context_budget
         import workflow
-        config = dict(CONFIG, context_window_tokens=10000)
+        config = dict(CONFIG, context_window_tokens=1_000_000)
         messages = [{"role": "user", "content": "bounded context integration " * 100}]
         for moment, field in [("2026-10-20T12:00:00+08:00", "max_completion_tokens"),
                               ("2026-10-20T23:00:00+08:00", "max_tokens")]:
@@ -159,7 +159,8 @@ class ReviewTests(unittest.TestCase):
                 route = review.select_route(config, moment)
                 budget = context_budget.plan_budget(messages, [], route, config)
                 self.assertFalse(budget["needs_compaction"])
-                self.assertTrue(budget["output_limited_by_context"])
+                self.assertFalse(budget["output_limited_by_context"])
+                self.assertEqual(budget["effective_output_tokens"], 393216)
                 effective_route = workflow._review_route_with_budget(route, budget)
                 payload = review.make_payload({}, effective_route, chat_messages=messages)
                 self.assertEqual(payload[field], budget["effective_output_tokens"])

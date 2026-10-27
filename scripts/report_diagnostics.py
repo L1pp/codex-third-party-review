@@ -15,6 +15,13 @@ import re
 import tempfile
 
 
+if __name__ == "__main__":
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from skill_runtime import launch_in_runtime
+    launch_in_runtime(__file__)
+
+
 _VERDICTS = {"confirmed", "dismissed", "needs_check"}
 _FINDING_ID = re.compile(r"^finding-[0-9]{4,}$")
 

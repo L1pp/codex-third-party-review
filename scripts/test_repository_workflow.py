@@ -273,6 +273,19 @@ print(json.dumps({"status":r["status"], "diagnostics":r.get("report_diagnostics_
         diagnostics = json.loads((out / "report_diagnostics.json").read_text(encoding="utf-8"))
         self.assertEqual(diagnostics["parse_status"], "not_requested")
 
+    def test_cli_defaults_to_current_repository_without_packet(self):
+        config_path = self.home / "config.json"
+        config_path.write_text(json.dumps(self.config), encoding="utf-8")
+        with patch.object(review.Path, "cwd", return_value=self.repo), \
+             patch.object(review, "load_credential", side_effect=AssertionError("no credential reads")), \
+             patch.object(review.requests, "Session", side_effect=AssertionError("no HTTP")), \
+             patch("sys.stdout", new_callable=io.StringIO) as output:
+            code = review.main(["--config", str(config_path), "--output-dir", str(self.out), "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["model_calls"], 0)
+        request = json.loads((self.out / "calls/0001-review/request.json").read_text(encoding="utf-8"))
+        self.assertTrue({"read_file", "list_files", "search_code"} <= {t["function"]["name"] for t in request["payload"]["tools"]})
+
     def test_cli_live_repo_source_redacts_known_key_before_capture(self):
         key = "offline-integration-key-never-real"
         (self.repo / "app.py").write_text("value = '" + key + "'\n", encoding="utf-8")
