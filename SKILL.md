@@ -1,20 +1,22 @@
 ---
 name: third-party-code-review
-description: 对代码、测试、依赖、迁移和影响运行行为的配置变动，或用户指定代码范围，补充一次独立只读第三方审阅，由主会话核实裁决。纯文档、规则说明和只读查询默认不触发。
+description: 对代码、测试、依赖、迁移和影响运行行为的配置变动，或用户指定代码范围，自动取材并补充独立只读第三方审阅，由主会话核实裁决。纯文档、规则说明和只读查询默认不触发。
 ---
 
 # 额外独立代码审阅
 
-保留主会话正常开发、审阅和验收流程。同一主任务由主会话额外运行一次本工作流，开发子 Agent 不重复调用。用户明确指定或禁止调用时遵从用户要求。
+保留正常 GPT 开发、审阅和验收流程；同一主任务由主会话额外运行一次，开发子 Agent 不重复调用。用户明确指定或禁止时遵从用户要求。
 
-1. 以当前加载的本 `SKILL.md` 所在目录为 Skill 根目录，定位其 `scripts/review.py` 和本地 `config.json`。尚未配置时先读 [README.md](README.md) 的安装与配置步骤；不要猜测安装路径或使用未定义的 Skill 环境变量。
-2. 将任务、需求、相关 diff、必要源文件快照和真实测试证据写入任务目录的 `packet.json`。常用字段是 `task`、`requirements`、`diff`、`files: [{path, content}]`、`test_results`。只放审阅所需材料，排除凭据、无关私有资料和主会话已有审阅结论。发送到外部服务的范围须处于用户授权之内。
-3. 遵守宿主项目的命令权限与审批规则。通过已定位的脚本运行以下命令，替换全部占位路径，输出目录必须是新的本地目录：
+1. 以本 `SKILL.md` 实际所在目录定位 `scripts/review.py` 和本地 `config.json`；尚未配置时读 [README.md](README.md)。不要猜测安装位置。
+2. 给出任务仓库、审阅目标、简短需求和已有测试证据，无需逐文件复制源码。默认 `worktree`；仅暂存改动用 `staged`，分支范围用 `range --base <本地ref>`。涉及额外工作区时通过 `--workspace-root` 指定，允许根重叠；`repo` 按目标 Git 视图读取，工作区别名始终读磁盘，核查时区分路径和来源版本。
+3. 遵守宿主项目和平台的命令权限，使用对应 Python 执行：
 
 ```text
-python "<Skill根目录>/scripts/review.py" --config "<Skill根目录>/config.json" --packet "<任务目录>/packet.json" --output-dir "<任务目录>/third-party-review-<新时间戳>" --task "<已有任务短标题>"
+python "<Skill根目录>/scripts/review.py" --repo "<项目目录>" --target worktree --task "<任务短标题>" --requirement "<必要需求>"
 ```
 
-4. 读取输出目录的 `report.md`、`result.json` 和必要材料，逐项核实、修复或驳回发现，再按主会话正常流程验收。失败、不完整、覆盖记录或无发现都不自动代表通过；供应商不可用时保留记录，继续已授权工作。修复后不自动再发起独立复审。
+可加 `--test-evidence "<已有测试结果文件>"`；脚本自动取材，模型可只读列目录、搜索和分页读取指定仓库/工作区。省略输出目录时自动保存到 Skill 的 `logs/reviews/` 并返回绝对路径；显式 `--output-dir` 必须是新目录。凭据、无关私有资料和主 GPT 结论不作为独立审阅材料，审阅工具不执行命令、修改代码或运行测试。
 
-运行时只向第三方开放本次内存快照的有限读取工具，不开放命令、写入或任意路径读取。配置决定模型、时区和预算；一次工作流可能包含多次模型与压缩请求。原始请求、响应和推理日志默认本地保留，可能含源码；不要随仓库发布。细节见 [架构与边界](docs/architecture.md)，依赖来源见 [复用说明](docs/reuse.md)。
+4. 读取输出目录的 `report.md`、`result.json`、`report_diagnostics.json`，核实每项发现后完成正常修复与验收。用 `scripts/report_diagnostics.py --review-dir "<输出目录>" --finding finding-0001 --verdict confirmed --reason "<依据>"` 记录裁决；值可用 `confirmed`、`dismissed`、`needs_check`，多项可用 `--decisions-file "<输出目录>/adjudication-input.json"` 批量记录，裁决输入不要放入被审源码目录，确需放入时必须排除取材；报告无发现时可用 `--note` 写核查说明。来源记录可能包含搜索未命中的本地文件，不等于模型已看过全文；定位诊断不替代投递事实或缺陷判断，保留疑点和原始发现。失败、不完整报告或无发现不自动代表通过；修复后不自动再开独立复审。
+
+需要明确材料集合或回放时，仍可使用 `--packet "<packet.json>" --output-dir "<新目录>"`，此模式只访问已给材料。源码读取版本、请求、响应与可用推理日志本地保留，可能含源码，不随仓库发布。预算、路由、来源记录和裁决格式见 [架构与边界](docs/architecture.md)。

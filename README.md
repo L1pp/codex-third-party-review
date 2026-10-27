@@ -2,9 +2,9 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A Codex Skill for supplementary, snapshot-based code review through an external model API.
+A Codex Skill for supplementary, repository-aware code review through an external model API.
 
-Your main GPT session prepares a code snapshot, an external model provides an independent read-only review, and the main session verifies the findings and decides what to change. Use it for code, tests, dependencies, migrations, and configuration that affects runtime behavior. Documentation-only changes and read-only queries are skipped by default.
+Your main GPT session supplies the project, review target, requirements, and existing test evidence. The runtime collects the initial changes, and an external model can explore the repository through read-only tools before returning findings. The main session verifies those findings and decides what to change. Use it for code, tests, dependencies, migrations, and configuration that affects runtime behavior. Documentation-only changes and read-only queries are skipped by default.
 
 This Skill does not change Codex's main model configuration. A completed report is not proof of full coverage or an approval to merge.
 
@@ -143,7 +143,7 @@ The default configuration uses **Asia/Shanghai (Beijing time)**, independently o
 
 The route is selected once at the start of a workflow. Material reads or checkpoint continuations do not switch models if the time crosses a boundary. Checkpoint compaction uses a separate, smaller output budget without switching the selected model. The provider selects the underlying model for `auto`; this project cannot identify it from that name. These limits describe configuration and service-adapter assumptions, not a live capability guarantee for every account or model.
 
-Defaults: a 1,000,000-token context window, approximately 100,000 locally estimated material tokens sent inline, overflow available through snapshot-only read tools, and checkpoint compaction at a 90% threshold. Local estimates are not the provider's `usage`. Missing optional tokenizer assets do not prevent operation. See [architecture and boundaries (Chinese)](docs/architecture.md).
+Defaults: a 1,000,000-token context window, approximately 100,000 locally estimated material tokens sent inline, and checkpoint compaction at a 90% threshold. Repository exploration remains available even when all initial materials fit inline; the model can look for callers, contracts, configuration, and relevant tests without the main session copying each file. Local estimates are not the provider's `usage`. Missing optional tokenizer assets do not prevent operation. See [architecture and boundaries (Chinese)](docs/architecture.md).
 
 **To use one model all day:** replace the complete `day` and `night` route objects, rather than changing only the model name and retaining another model's reasoning/output parameters. For example, replace both route objects with the following to use DeepSeek throughout the day; retain every other top-level configuration field:
 
@@ -190,7 +190,107 @@ python scripts/review.py --config config.json --route-only --at 2026-10-27T22:00
 
 With the defaults, the simulated routes should show `auto` and `deepseek-v4.1-flash-1017`, respectively. `--at` is only for offline routing or dry runs; it cannot force the route of a real request.
 
-Create `packet.json` in the Skill root with this fictional example to check request construction. For real work, replace it with the relevant diff, necessary source snapshots, and actual test evidence:
+Point the runtime at a local Git project to preview automatic collection and the initial request. Replace the project path with your own:
+
+```text
+python scripts/review.py --config config.json --repo "/path/to/project" --target worktree --task "Review the current changes" --dry-run
+```
+
+No `packet.json` is needed. On success, terminal JSON has `status` set to `dry_run`, zero actual model calls, and an absolute `output_dir`. If omitted in repository mode, the output directory is generated under the installed Skill's `logs/reviews/` with a UTC timestamp. You can instead provide a new `--output-dir` explicitly.
+
+Both `--route-only` and `--dry-run` avoid loading credentials. A dry run reads project materials and writes local snapshots and planned requests; it does not validate the API key or service availability and cannot remove arbitrary secrets accidentally included in source material. Keep its output private.
+
+## 5. Invoke it in Codex
+
+Once the Skill is installed and credentials are configured, enter this in your development project's Codex session:
+
+```text
+Use $third-party-code-review to review this project's current changes. Automatically collect the diff and source context, let the reviewer inspect related files, and have the main session verify and adjudicate its findings.
+```
+
+The main session gives the runtime the repository, target, short requirements, and any existing test-evidence file. It no longer needs to copy source into a review packet. If you use a virtual environment, also supply its absolute Python path.
+
+The reviewer can list files, search code, and read paginated text within the selected repository and any supplied workspace roots. These tools remain available even for a small change that was fully inlined. The runtime records the content actually read as numbered source versions; subsequent reads reuse that version. Review-time reads do not execute commands, modify code, or run tests. The main session remains responsible for changes and testing under the host project's and platform's permission rules.
+
+`allow_implicit_invocation=true` permits Codex to match the Skill automatically; **installation does not guarantee a review after every development task**. To request a review by default in a project, add a rule such as the following to that project's `AGENTS.md`. Installation does not modify global instructions:
+
+```text
+For code, tests, dependencies, migrations, and configuration changes affecting runtime behavior, have the main session run $third-party-code-review once in addition to normal GPT review. Skip documentation-only changes and read-only queries by default. Supply the repository, review target, requirements, and existing test evidence; let the runtime collect source and the reviewer explore it read-only. The main session verifies and adjudicates findings. Failed or incomplete reports do not count as approval.
+```
+
+## 6. Run manually without Codex
+
+From the Skill root, with credentials configured, the following command **sends project materials to the external service and consumes quota or credits**:
+
+```text
+python scripts/review.py --config config.json --repo "/path/to/project" --target worktree --task "Review the current changes" --requirement "Preserve the documented public behavior"
+```
+
+Repository targets:
+
+| Target | Initial changes and primary repository reads |
+| --- | --- |
+| `worktree` (default) | Changes against HEAD, including staged and unstaged edits; non-ignored untracked text files are collected separately. Reads use the current working tree. |
+| `staged` | Staged diff; reads use the Git index, so unstaged edits are not substituted for the staged version. |
+| `range --base <ref>` | Changes from the merge base of the specified ref and HEAD to HEAD; reads use HEAD. The base ref must exist locally. |
+
+Known deleted repository files remain discoverable in `list_files` entries as `deleted/base`; `read_file` returns their selected baseline even when they were omitted from the initial materials. Extra workspace roots retain their working-tree view.
+
+Examples:
+
+```text
+python scripts/review.py --config config.json --repo "/path/to/project" --target staged --task "Review staged changes"
+python scripts/review.py --config config.json --repo "/path/to/project" --target range --base origin/main --task "Review this branch"
+python scripts/review.py --config config.json --repo "/path/to/project" --workspace-root "/path/to/shared-library" --test-evidence "/path/to/test-results.txt" --task "Review the integration"
+```
+
+Repeat `--workspace-root` for multiple additional roots, or `--requirement` for multiple short requirements. Roots may overlap; overlap is not rejected. The `repo` alias follows the selected Git view, while `workspace-*` aliases always read from disk. Overlapping roots can therefore expose different versions of the same file; use the root-qualified path and `source_id` when checking a finding, rather than treating a workspace read as the primary Git version. `--test-evidence` reads an existing file; it does not run the described tests. Known credential locations and the runtime's own output are excluded from exploration; skipped initial materials carry reasons. The tools use root-relative paths and do not grant arbitrary filesystem or shell access.
+
+Each file is captured when first read, so different files can reflect different read times. This is a record of the materials observed, **not an atomic snapshot of the whole repository**. Do not claim a finding was checked against a later edit without verifying that edit.
+
+### Inspect the report and record the main session's decisions
+
+The terminal prints the absolute output directory. It contains:
+
+| File | Purpose |
+| --- | --- |
+| `report.md`, `result.json`, `workflow.json` | Original visible report, parsed result, workflow completion and context records |
+| `calls/` | Individual request, response-stream, available reasoning, and timing records |
+| `sources/index.json`, `sources/source-0001.txt`, ... | Numbered local source records, including files scanned by a search that returned no match |
+| `report_diagnostics.json` | Derived field, location, evidence, and JSON-recovery diagnostics; original findings are preserved |
+| `adjudication.json` | Main-session decisions, initially pending; not an automatic approval |
+
+Local source capture is broader than model delivery: a search can retain a scanned file locally while returning no text from it to the model. Indexed source counts in `coverage` do not prove that the model saw or reviewed those files. A diagnostic `matched` result only checks the recorded text, not whether that text was delivered or the bug is real.
+
+Check `workflow_status`, `parse_ok`, `completion_warning`, findings, missing context, and diagnostics. A location match does not prove a bug; a missing or ambiguous match does not silently delete the finding. Recovery that may lose findings is marked accordingly. A returned report, an empty findings list, or a finished request does not automatically mean the code passed review. Retain failures and partial reports for the main session to assess.
+
+After checking a finding against the source and test evidence, record a decision locally without another model call:
+
+```text
+python scripts/report_diagnostics.py --review-dir "/path/to/review-output" --finding finding-0001 --verdict confirmed --reason "Verified the triggering input and the affected call path"
+```
+
+Use `confirmed`, `dismissed`, or `needs_check` as the verdict. Use the finding IDs from that report, not invented IDs. Decisions and their history are separate from the original model report and are not sent back as input to the independent review.
+
+For several findings, place a JSON array of decision objects (`id`, `verdict`, `reason`, and optional `evidence`) in `adjudication-input.json` inside the generated review output directory, then record them in one call:
+
+```text
+python scripts/report_diagnostics.py --review-dir "/path/to/review-output" --decisions-file "/path/to/review-output/adjudication-input.json"
+```
+
+Keep decision input files out of the reviewed source tree so they do not become independent-review material. If a project location is unavoidable, explicitly exclude it from review collection.
+
+`--note "..."` can record an overall verification note, including when the report has no findings. A recorded decision or note is not an automatic merge approval.
+
+Inspect local call summaries without calling a model:
+
+```text
+python scripts/review.py --config config.json --history --outcome success --slowest --limit 10
+```
+
+### Packet mode: compatibility and replay
+
+For an explicitly selected material set or offline replay, prepare a private `packet.json` with the following shape:
 
 ```json
 {
@@ -203,46 +303,14 @@ Create `packet.json` in the Skill root with this fictional example to check requ
 ```
 
 ```text
-python scripts/review.py --config config.json --packet packet.json --output-dir outputs/dry-run-001 --dry-run
+python scripts/review.py --config config.json --packet packet.json --output-dir outputs/packet-dry-run-001 --dry-run
 ```
 
-On success, the terminal JSON has `status` set to `dry_run`, with zero actual model calls. Inspect the snapshot and planned request in the output directory. This does not validate the API key or service availability. Both `--route-only` and `--dry-run` avoid loading credentials. A dry run writes local files and does not remove secrets accidentally placed in the packet. The output directory must be new; use `dry-run-002`, for example, on the next run.
-
-## 5. Invoke it in Codex
-
-Once the Skill is installed and credentials are configured, enter this in your development project's Codex session:
-
-```text
-Use $third-party-code-review for an additional independent review of the current code changes. Have the main session verify and adjudicate the findings.
-```
-
-If you use a virtual environment, also tell Codex the absolute path of its Python interpreter. The main session follows [SKILL.md](SKILL.md) to prepare materials and run the script. The reviewer can read only this snapshot; it cannot execute commands, write files, or read arbitrary paths. Commands remain subject to your host project's and platform's permission rules.
-
-`allow_implicit_invocation=true` permits Codex to match the Skill automatically; **installation does not guarantee a review after every development task**. To request a review by default in a project, add a rule such as the following to that project's `AGENTS.md`. Installation does not modify global instructions:
-
-```text
-For code, tests, dependencies, migrations, and configuration changes affecting runtime behavior, have the main session run $third-party-code-review once in addition to normal GPT review. Skip documentation-only changes and read-only queries by default. The third-party reviewer is read-only; the main session verifies and adjudicates findings. Failed or incomplete reports do not count as approval.
-```
-
-## 6. Run manually without Codex
-
-From the Skill root, with `packet.json` and credentials configured, this command **sends the materials to the external service and consumes quota or credits**:
-
-```text
-python scripts/review.py --config config.json --packet packet.json --output-dir outputs/review-001 --task "Additional review of integer addition"
-```
-
-Use a new output directory, not the dry-run directory. Results are in `report.md`, `result.json`, and `workflow.json`; individual request records are under `calls/`. Check `workflow_status`, `parse_ok`, `completion_warning`, findings, and missing context. A returned report, an empty findings list, or a finished request does not automatically mean the code passed review. Retain provider failures for the main session to assess.
-
-Inspect local call summaries without calling a model:
-
-```text
-python scripts/review.py --config config.json --history --outcome success --slowest --limit 10
-```
+Packet mode uses only the supplied materials, with bounded snapshot read/search tools when needed. It does not discover additional repository files. It still requires a new explicit `--output-dir`; use a different directory on each run. Removing `--dry-run` makes a real API request and requires credentials. Repository mode is the normal entry point when you want the reviewer to find additional context.
 
 ## Logs, updates, and development
 
-Real calls retain materials, requests, response streams, available reasoning text, and results locally. These can contain source code or private paths. The known current API key is redacted where possible; this is not a general secret scanner and does not make logs safe to publish. Git ignores local configuration, common output directories, packets, logs, the ledger, and tokenizer JSON. Do not force-add or share them.
+Real calls retain collected materials, explored source versions, requests, response streams, available reasoning text, diagnostics, decisions, and results locally. These can contain source code or private paths. The known current API key is redacted where possible; this is not a general secret scanner and does not make logs safe to publish. Git ignores local configuration, common output directories, packets, logs, the ledger, and tokenizer JSON. Keep all review output directories, including source captures and adjudication records, private even if you choose a custom location. Do not force-add or share them.
 
 To update a cloned installation, run `git pull --ff-only` in its directory, then install dependencies again with the same interpreter using `python -m pip install -r requirements.txt`. **Do not overwrite your personal `config.json` by copying the example again.** Compare new configuration fields and merge them manually if needed.
 

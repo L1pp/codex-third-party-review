@@ -29,7 +29,19 @@ python scripts/bailian_catalog.py lookup --model deepseek-v4.1-flash-1017
 
 本次按 CLI 2.5.1 的 [text/chat 实现](https://github.com/modelstudioai/cli/blob/main/packages/commands/src/commands/text/chat.ts) 核查：它适合一般单次模型调用，但流式 JSON 结果聚合的是 `content`，没有给本工作流完整保留推理、工具调用、用量和终止状态。命令参数也不能直接表达当前 Token Plan 使用的全部推理与组合输出配置。因此没有把请求层简单替换成 `bl text chat`，也没有为包装 TypeScript core 额外增加 Node 桥接进程。
 
-可直接复用的是官方公共目录与现有凭据配置；SSE 换行边界处理作为实现参考并加入真实解码器回归。快照读取、90% 压缩续审、完整响应归档和轻量台账继续由 Python 运行时负责。以后官方 CLI 若提供完整机器可读流事件，再评估收敛请求层；这不是对未来版本能力的判断。
+可直接复用的是官方公共目录与现有凭据配置；SSE 换行边界处理作为实现参考并加入真实解码器回归。仓库自动取材、只读探索、90% 压缩续审、完整响应归档、诊断和轻量台账继续由 Python 运行时负责。以后官方 CLI 若提供完整机器可读流事件，再评估收敛请求层；这不是对未来版本能力的判断。
+
+## 仓库取材与报告诊断的参考
+
+仓库模式采用自动取材加只读探索，快照改为记录实际读到的内容；旧 packet 模式继续用于材料限定和回放。此调整保留现有 Python 请求、预算和日志层。
+
+比较同类实现后，主要参考了以下设计方向：
+
+- [Prism 函数上下文](https://github.com/dshills/prism/blob/main/internal/gitctx/funccontext.go)：用 Git 差异和函数周边帮助准备初始材料，避免主 Agent 逐文件复制。实际取材不承诺完整调用链。
+- [Prism 证据与定位核验](https://github.com/dshills/prism/blob/main/internal/review/verify.go) 和 [JSON 恢复](https://github.com/dshills/prism/blob/main/internal/review/salvage.go)：把结构、位置和恢复诊断与原始发现分开，不将记录文本中的定位匹配误当已投递、已审阅或 Bug 成立。
+- [Prism 反馈记录](https://github.com/dshills/prism/blob/main/internal/review/feedback.go)：把事后确认、驳回和依据独立记录；本项目使用顺序 ID，不引入其哈希标识、缓存或自动门禁。
+
+这些是设计参考，不表示依赖或内置了上述 Go 实现，也不把它的仓库命令执行、自动重试、切模型或共识投票引入当前流程。若后续直接复制或改编外部源码，应按实际使用范围保留许可证、归属及相应 NOTICE；以根目录第三方说明为准。
 
 ## 本次发布包含什么
 
