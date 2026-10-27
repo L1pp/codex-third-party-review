@@ -224,7 +224,7 @@ class RepositorySourceTests(unittest.TestCase):
         self._assert_literal_diff_name_cannot_include_excluded_source('literal*.py','literal-other.py')
 
     def test_workspace_walk_prunes_private_and_explicitly_excluded_directories(self):
-        workspace=Path(self.temp.name)/'workspace';workspace.mkdir()
+        workspace=(Path(self.temp.name)/'workspace').resolve();workspace.mkdir()
         (workspace/'artifacts').mkdir();(workspace/'logs').mkdir();(workspace/'custom-private').mkdir()
         (workspace/'src/logs').mkdir(parents=True)
         (workspace/'src/logs/logger.py').write_text('source = True\n',encoding='utf-8')
