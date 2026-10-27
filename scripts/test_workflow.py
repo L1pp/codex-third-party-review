@@ -475,7 +475,7 @@ class WorkflowTests(unittest.TestCase):
         workflow_doc = json.loads((self.root / "workflow.json").read_text(encoding="utf-8"))
         self.assertTrue(workflow_doc["content_is_partial"])
         checkpoint_path = Path(result["checkpoint_file"])
-        self.assertEqual(checkpoint_path, self.root / "checkpoint.txt")
+        self.assertEqual(checkpoint_path, (self.root / "checkpoint.txt").resolve())
         self.assertIn("first finding", checkpoint_path.read_text(encoding="utf-8"))
         report = (self.root / "report.md").read_text(encoding="utf-8")
         self.assertIn("visible partial before continuation failure", report)

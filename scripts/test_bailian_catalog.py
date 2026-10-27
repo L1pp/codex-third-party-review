@@ -231,7 +231,7 @@ class LauncherTests(unittest.TestCase):
                 shim, target, package = self.npm_install(suffix)
                 with patch.object(catalog.shutil, "which", return_value=str(shim)):
                     resolved = catalog.resolve_cli()
-                self.assertEqual(resolved["argv"], [str(node), str(target.resolve())])
+                self.assertEqual(resolved["argv"], [str(node.resolve()), str(target.resolve())])
                 self.assertEqual(resolved["version"], "2.5.1")
 
     def test_missing_cli_missing_node_and_unrecognized_batch_have_safe_codes(self):
