@@ -238,7 +238,7 @@ report = {"findings": []}
 def call(*args, **kwargs):
     return {"status":"completed", "finish_reason":"stop", "content":json.dumps(report),
             "parse_ok":True, "parsed_report":report, "parsed_findings":[]}
-r=run_workflow({"context_window_tokens":10000}, {"files":[{"path":"x.py","content":"value=1"}]},
+r=run_workflow({"context_window_tokens":10000,"context_management":{"headroom_tokens":0}}, {"files":[{"path":"x.py","content":"value=1"}]},
     Path(sys.argv[1]), review_call=call, route_selector=lambda cfg, at=None:{"model":"offline","max_tokens":1024})
 print(json.dumps({"status":r["status"], "diagnostics":r.get("report_diagnostics_file")}))
 """

@@ -139,11 +139,11 @@ The default configuration uses **Asia/Shanghai (Beijing time)**, independently o
 | Beijing time when the workflow starts | Requested model | Review reasoning and output configuration |
 | --- | --- | --- |
 | 08:00 inclusive to 22:00 exclusive | `auto` | Local assumptions of 131,072 answer tokens and 262,144 reasoning tokens; sends combined `max_completion_tokens=393216` |
-| 22:00 inclusive to 08:00 exclusive | `deepseek-v4.1-flash-1017` | `reasoning_effort=max`, `max_tokens=393216` |
+| 22:00 inclusive to 08:00 exclusive | `deepseek-v4.1-flash-1017` | `reasoning_effort=max`, `max_tokens=256000` |
 
 The route is selected once at the start of a workflow. Material reads or checkpoint continuations do not switch models if the time crosses a boundary. Checkpoint compaction uses a separate, smaller output budget without switching the selected model. The provider selects the underlying model for `auto`; this project cannot identify it from that name. These limits describe configuration and service-adapter assumptions, not a live capability guarantee for every account or model.
 
-Defaults: a 1,000,000-token context window, approximately 100,000 locally estimated material tokens sent inline, and checkpoint compaction before the estimated input plus reserved output reaches the 90% threshold. Repository exploration remains available even when all initial materials fit inline; the model can look for callers, contracts, configuration, and relevant tests without the main session copying each file. Local estimates are not the provider's `usage`. The dedicated CLI checks native DeepSeek tokenizer readiness before any request. See [architecture and boundaries (Chinese)](docs/architecture.md).
+Defaults: a 1,000,000-token context window and approximately 100,000 locally estimated material tokens sent inline. DeepSeek uses the published DSH output default of 256,000 tokens with max reasoning effort. Before each request, the runtime reserves the full configured output and 65,536 tokens of headroom; it checks pressure at the smaller of 80% of the window and the remaining input budget (678,464 input tokens for the default DeepSeek route). Under pressure it first trims old, re-readable tool results locally, then summarizes older progress if needed while retaining a balanced recent tail. It does not interrupt an active stream to compact. Repository exploration remains available even when all initial materials fit inline; the model can look for callers, contracts, configuration, and relevant tests without the main session copying each file. Local estimates are not the provider's `usage`. The dedicated CLI checks native DeepSeek tokenizer readiness before any request. See [architecture and boundaries (Chinese)](docs/architecture.md).
 
 **To use one model all day:** replace the complete `day` and `night` route objects, rather than changing only the model name and retaining another model's reasoning/output parameters. For example, replace both route objects with the following to use DeepSeek throughout the day; retain every other top-level configuration field:
 
@@ -154,12 +154,12 @@ Defaults: a 1,000,000-token context window, approximately 100,000 locally estima
     "end": "22:00",
     "model": "deepseek-v4.1-flash-1017",
     "reasoning_effort": "max",
-    "max_tokens": 393216
+    "max_tokens": 256000
   },
   "night": {
     "model": "deepseek-v4.1-flash-1017",
     "reasoning_effort": "max",
-    "max_tokens": 393216
+    "max_tokens": 256000
   }
 }
 ```

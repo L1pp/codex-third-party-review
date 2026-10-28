@@ -52,3 +52,7 @@ adjudication-input*.json
 private-decisions.json
 **/sources/index.json
 **/sources/source-*.txt
+
+# Full local tool deliveries before request-history cleanup
+tool_results.jsonl
+checkpoints/

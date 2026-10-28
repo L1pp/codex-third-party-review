@@ -9,6 +9,7 @@
   -> workflow.py：初始内联、工具循环、预算与压缩续审
       -> materials.py：已捕获材料的索引、分页和字面搜索
       -> context_budget.py：本地估算与输入/输出预算
+      -> history_cleanup.py：旧读取结果清理、完整工具往返与近期历史保留
   -> report_parsing.py：调用 json-repair 恢复语法，保留报告选择与完整性判断
   -> 原始报告 + report_diagnostics.json + pending adjudication.json
 主 GPT 结合源码和测试核实、修复、验收并记录裁决
@@ -48,7 +49,13 @@
 
 默认优先直接内联约 100,000 个本地估算 token 的初始材料；超出部分可按需读取，仓库中的额外文件也可探索。差异、源文件、任务说明、材料索引、工具定义和工具结果均占上下文。代码没有要求主 GPT 在每次调用前手工制作完整 packet。
 
-模型请求材料后继续同一审阅对话；接近配置阈值时，由运行器用模型生成检查点并续审。默认上下文为 1,000,000 token，在 90% 阈值压缩。输出达到长度上限的续审仍沿用既有工作流；来源版本保留，checkpoint 不替代主会话核实。
+模型请求材料后继续同一审阅对话。每次请求前重新计算压力，按以下顺序处理：
+
+1. 仅在达到阈值后，缩减近期保留范围之外的可重读旧工具结果。重复读取须同时匹配工具、根、视图、source ID、路径、行/字符范围和文本，不按路径直接合并。大于 8,192 字符的旧读取结果保留前 4,096 和后 1,024 字符，并显式说明省略区间及原读取参数。
+2. 重新计数；已恢复空间就继续审阅，不调用摘要模型。初始材料本身过大时，减少内联部分，完整材料仍可通过读取工具获取。
+3. 仍超预算才摘要旧进度，保留已发现问题、依据、旧 checkpoint、实际投递范围和未完成项；近期完整对话原样保留。近期目标为扣除完整输出预留后的窗口的 16%，DeepSeek 默认是 119,040 token。按完整 assistant/tool 往返切分，单个超大往返整体进入摘要，不拆开工具调用及返回。
+
+摘要生成后若请求仍超预算且估算没有减少，保留进度并结束为未完成，避免无变化的重复压缩；这是按实际进展判断，没有新增次数硬上限。输出以 `length` 结束时仍通过 checkpoint 续审，保留部分正文和可用推理，不执行未完成的工具调用。运行器不取消正在生成的流以插入压缩请求。来源版本、旧请求和原文保留，checkpoint 不替代主会话核实。
 
 路由在一轮工作流开始时确定，续审不因时段跨界切模型。压缩可以使用独立的较小输出预算；供应商与用户设定的适用上限仍保留。`automatic_retries=0` 禁止供应商错误后自动重试或切换模型。`max_model_calls` / `max_compactions` 可设正整数，`null` 或兼容的 `0` 表示没有固定次数限制。无法完成时保存已有材料和部分报告，明确未完成原因。
 
@@ -60,7 +67,7 @@
 
 ## 原始记录、派生诊断和裁决
 
-输出根目录包括 `materials.json`、`workflow.json`、`result.json`、`report.md`，必要时有 `checkpoint.txt`；每次模型调用在独立 `calls/` 子目录保留请求、预算、响应、状态与可用推理日志。仓库模式另有 `sources/`。`response_log.py` 尽力保存收到的 SSE 行和推理文本，针对已知当前 API key 脱敏；这不是任意秘密扫描，记录仍应私有。
+输出根目录包括 `materials.json`、`workflow.json`、`result.json`、`report.md`，必要时有最新 `checkpoint.txt` 及逐版 `checkpoints/`；工具执行原文先写入 `tool_results.jsonl`，与后续请求视图清理分开；每次模型调用在独立 `calls/` 子目录保留请求、预算、响应、状态与可用推理日志。仓库模式另有 `sources/`。`response_log.py` 尽力保存收到的 SSE 行和推理文本，针对已知当前 API key 脱敏；这不是任意秘密扫描，记录仍应私有。
 
 `report_parsing.py` 将通用 JSON 语法恢复委托给必装依赖 [json-repair](https://github.com/mangiucugna/json_repair)，不再维护一套引号、逗号或括号修复器。恢复在本地完成，不调用模型；原始响应不改写，恢复报告候选和库返回的修复日志作为派生记录保留。我们自己的代码继续负责顶层报告选择、多报告歧义、可能丢失内容的判断，以及发现和裁决的关联。修复库可能补全结构，因此合法 JSON 不等于完整报告，更不证明发现正确；无法确认的恢复仍保留不完整状态，不把空数组当作通过依据。
 
@@ -80,7 +87,7 @@
 
 `skill_runtime.py setup` 在 Skill 自己的 `.venv` 中安装依赖并检查本地官方 tokenizer，`review.py` 与裁决 CLI 从其他 Python 启动时自动以隔离模式重新进入它。保留调用者的仓库工作目录和凭据传递方式，忽略继承的 Python 搜索路径；不修改项目虚拟环境或模型配置。没有显式 `--repo`/`--packet` 时，审阅默认探索当前 Git 仓库。
 
-DeepSeek 使用官方 tokenizer 分词，并以本地模板加工具和推理字段估算请求；估算仍不等于供应商的精确 usage。auto 保留明确标注的保守估算。规划器先为整轮配置的输出额度预留空间：预计输入加完整输出和安全余量达到压缩阈值时，先压缩再调用，不把审阅输出削到只剩几千 token。真正的 `length` 终止仍保留原有续审机制。未添加模型轮数或工具次数硬上限。
+DeepSeek 使用官方 tokenizer 分词，并以本地模板加工具和推理字段估算请求；估算仍不等于供应商的精确 usage。auto 保留明确标注的保守估算。规划器采用已发布 DeepSeek Harness 的完成额度预留与 headroom 公式。设窗口为 W、完整输出额度为 O、余量为 H、比例阈值为 R，则预计输入压力阈值为 `min(floor(W × R), W − O − H)`，供应商较小的 max-input 仍可收紧它。默认 H 为 65,536，已包含本地 2,048 safety margin，不重复扣减；R 为 0.8，均可配置。DeepSeek 的 W=1,000,000、O=256,000，所以压力阈值是 678,464；auto 继续采用正文加推理的 393,216 本地假设，在同样窗口下阈值为 541,248，仍是保守字节估算，不能与 DeepSeek 原生 token 数直接比较。阈值触发的是分层清理，并不必然触发一次模型摘要。不把审阅输出削到只剩几千 token。真正的 `length` 终止仍保留原有续审机制。未添加模型轮数或工具次数硬上限。
 
 ## 统一审阅契约与补充来源
 
@@ -89,3 +96,12 @@ DeepSeek 使用官方 tokenizer 分词，并以本地模板加工具和推理字
 显式 `--include-file` 使用 `supplement` 根提供主仓库内选定的当前磁盘文件，可补充被 Git 或输出目录规则排除的临时脚本，不改变主 repo 的 Git 读取视图，也不开放同目录其他文件。来源、首次读取快照、行号和 source ID 复用已有机制。
 
 `review_progress.py` 的 CLI 状态摘要按一分钟间隔写入 stderr，包含计数而不含源码/推理正文；库调用默认不输出。状态输出失败不会改变审阅结果，stdout 的 JSON 契约保持。
+
+
+## 上游依据与验证边界
+
+本次默认值对照已发布的 `@deepseek-ai/dsh@0.2.1-rc.2` 及其同版依赖，核对时间 2026-10-28。参考 [DeepSeek 适配器](https://unpkg.com/@deepseek-ai/dsh-llm-deepseek@0.2.1-rc.2/lib/index.js) 的 1,000,000 窗口与 256,000 默认输出，以及 [compaction-basic](https://unpkg.com/@deepseek-ai/dsh-compaction-basic@0.2.1-rc.2/lib/index.js) 的 0.8 阈值、65,536 headroom 和 0.16 近期保留比例。旧工具结果缩减参考 [官方 tool-result-pruner](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/compaction/compaction-tool-result-pruner)。这里只适配本项目的消息、来源和记录契约，没有引入整套 Node CLI。
+
+这些是客户端默认值，不是模型 API 最大能力保证。上游 master 的内置窗口、实时模型元数据和显式覆盖值可能不同，不能把本项目静态阈值当成所有 DSH 实例的实际触发点。配置更大的自定义输出额度仍受完整预留、供应商上限和 headroom 约束。
+
+本轮只做离线回归和模拟供应商验证，不声称已证明真实长审阅质量或延迟改善。下一阶段的质量、运行成本和边界验证仅列为[计划](validation-plan.md)，没有启动模型实验。

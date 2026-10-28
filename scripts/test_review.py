@@ -115,7 +115,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(night["model"], "deepseek-v4.1-flash-1017")
         self.assertEqual(night["reasoning_effort"], "max")
         self.assertTrue(night["enable_thinking"])
-        self.assertEqual(night["max_tokens"], 393216)
+        self.assertEqual(night["max_tokens"], 256000)
         self.assertNotIn("thinking_budget", night)
         self.assertIn(packet["files"][0]["content"], night["messages"][1]["content"])
 
@@ -131,7 +131,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(review.make_payload({}, explicit_total)["max_completion_tokens"], 12345)
         self.assertNotIn("max_tokens", review.make_payload({}, explicit_total))
         night = review.select_route(CONFIG, "2026-10-20T23:00:00+08:00")
-        self.assertEqual(review.make_payload({}, night)["max_tokens"], 393216)
+        self.assertEqual(review.make_payload({}, night)["max_tokens"], 256000)
         self.assertNotIn("thinking_budget", review.make_payload({}, night))
 
     def test_auto_wire_total_uses_effective_split_caps_and_compression_has_no_thinking(self):
@@ -160,13 +160,13 @@ class ReviewTests(unittest.TestCase):
                 budget = context_budget.plan_budget(messages, [], route, config)
                 self.assertFalse(budget["needs_compaction"])
                 self.assertFalse(budget["output_limited_by_context"])
-                self.assertEqual(budget["effective_output_tokens"], 393216)
+                self.assertEqual(budget["effective_output_tokens"], 256000 if field == "max_tokens" else 393216)
                 effective_route = workflow._review_route_with_budget(route, budget)
                 payload = review.make_payload({}, effective_route, chat_messages=messages)
                 self.assertEqual(payload[field], budget["effective_output_tokens"])
                 self.assertLessEqual(payload[field], budget["remaining_tokens"])
                 self.assertLessEqual(budget["input_tokens"] + payload[field] + budget["safety_tokens"],
-                                     budget["compression_trigger_tokens"])
+                                     budget["context_limit"])
                 self.assertNotIn("thinking_budget", payload)
 
     def test_auto_combined_route_rejects_unknown_output_parameter(self):
@@ -200,7 +200,7 @@ class ReviewTests(unittest.TestCase):
             requests = list((folder / "run" / "calls").glob("*/request.json"))
             self.assertEqual(len(requests), 1)
             request = review.read_json(requests[0])
-            self.assertEqual(request["payload"]["max_tokens"], 393216)
+            self.assertEqual(request["payload"]["max_tokens"], 256000)
             self.assertNotIn("Authorization", requests[0].read_text(encoding="utf-8"))
             self.assertNotIn("tools", request["payload"])
             user_data = json.loads(request["payload"]["messages"][1]["content"])

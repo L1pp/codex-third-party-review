@@ -37,7 +37,7 @@ class ContextBudgetTests(unittest.TestCase):
             messages,
             tools,
             {"model": "auto", "max_tokens": None},
-            {"context_window_tokens": 1_000_000, "context_management": {"safety_tokens": 2048}},
+            {"context_window_tokens": 1_000_000, "context_management": {"headroom_tokens": 0, "safety_tokens": 2048}},
         )
         self.assertEqual((messages, tools), before)
         self.assertEqual(result["requested_output_tokens"], 393_216)
@@ -52,7 +52,7 @@ class ContextBudgetTests(unittest.TestCase):
         }
         result = context_budget.plan_budget(
             [{"role": "user", "content": "small request"}], [], route,
-            {"context_window_tokens": 1_000_000, "context_management": {"safety_tokens": 2048, "compression_trigger_ratio": 0.9}},
+            {"context_window_tokens": 1_000_000, "context_management": {"headroom_tokens": 0, "safety_tokens": 2048, "compression_trigger_ratio": 0.9}},
         )
         self.assertTrue(result["split_output_budget"])
         self.assertEqual(result["requested_output_tokens"], 393_216)
@@ -70,7 +70,7 @@ class ContextBudgetTests(unittest.TestCase):
         result = context_budget.plan_budget(
             [{"role": "user", "content": "small"}], [],
             {"model": "qwen3.8-max", "output_limit_parameter": "max_tokens", "max_tokens": 131_072, "thinking_budget": 262_144},
-            {"context_window_tokens": 1_000_000, "context_management": {"safety_tokens": 2048}},
+            {"context_window_tokens": 1_000_000, "context_management": {"headroom_tokens": 0, "safety_tokens": 2048}},
             output_cap=1_000,
         )
         self.assertEqual(result["requested_output_tokens"], 1_000)
@@ -85,7 +85,7 @@ class ContextBudgetTests(unittest.TestCase):
         result = context_budget.plan_budget(
             messages, [],
             {"model": "qwen3.8-flash", "output_limit_parameter": "max_tokens", "max_tokens": 100, "thinking_budget": 200},
-            {"context_window_tokens": input_tokens + 1, "context_management": {"safety_tokens": 0, "compression_trigger_ratio": 1.0}},
+            {"context_window_tokens": input_tokens + 1, "context_management": {"headroom_tokens": 0, "safety_tokens": 0, "compression_trigger_ratio": 1.0}},
         )
         self.assertEqual(result["remaining_tokens"], 1)
         self.assertTrue(result["needs_compaction"])
@@ -95,7 +95,7 @@ class ContextBudgetTests(unittest.TestCase):
         result = context_budget.plan_budget(
             [{"role": "user", "content": "short"}], [],
             {"model": "deepseek-v4.1-flash-1017", "max_tokens": 393_216},
-            {"context_window_tokens": 1_000_000, "context_management": {"safety_tokens": 2048, "compression_trigger_ratio": 0.9}},
+            {"context_window_tokens": 1_000_000, "context_management": {"headroom_tokens": 0, "safety_tokens": 2048, "compression_trigger_ratio": 0.9}},
         )
         self.assertFalse(result["split_output_budget"])
         self.assertEqual(result["requested_output_tokens"], 393_216)
@@ -155,7 +155,7 @@ class ContextBudgetTests(unittest.TestCase):
             estimate = context_budget.estimate_tokens(messages, tools, "deepseek-v4.1-flash-1017")
             plan = context_budget.plan_budget(
                 messages, tools, {"model": "deepseek-v4.1-flash-1017"},
-                {"context_window_tokens": 1_000_000, "context_management": {"safety_tokens": 2048}},
+                {"context_window_tokens": 1_000_000, "context_management": {"headroom_tokens": 0, "safety_tokens": 2048}},
             )
         self.assertEqual((messages, tools), before)
         self.assertEqual(estimate["method"], "deepseek_utf8_upper_bound_tokenizer_unavailable")
@@ -182,7 +182,7 @@ class ContextBudgetTests(unittest.TestCase):
     def test_over_budget_returns_compaction_plan_instead_of_raising(self):
         result = context_budget.plan_budget(
             [{"role": "user", "content": "这段内容很长" * 80}], [], {"model": "auto"},
-            {"context_window_tokens": 32, "context_management": {"safety_tokens": 4}},
+            {"context_window_tokens": 32, "context_management": {"headroom_tokens": 0, "safety_tokens": 4}},
             output_cap=20,
         )
         self.assertTrue(result["needs_compaction"])
@@ -192,7 +192,7 @@ class ContextBudgetTests(unittest.TestCase):
     def test_output_cap_precedence_and_available_space(self):
         result = context_budget.plan_budget(
             [{"role": "user", "content": "hi"}], [], {"model": "auto", "max_tokens": 50},
-            {"context_window_tokens": 1000, "context_management": {"safety_tokens": 10, "auto_output_reserve_tokens": 80}},
+            {"context_window_tokens": 1000, "context_management": {"headroom_tokens": 0, "safety_tokens": 10, "auto_output_reserve_tokens": 80}},
             output_cap=40,
         )
         self.assertEqual(result["requested_output_tokens"], 40)
@@ -202,7 +202,7 @@ class ContextBudgetTests(unittest.TestCase):
         estimate = context_budget.estimate_tokens([{"role": "user", "content": "hi"}], [], "auto")["input_tokens"]
         limited = context_budget.plan_budget(
             [{"role": "user", "content": "hi"}], [], {"model": "auto"},
-            {"context_window_tokens": estimate + 10 + 10, "context_management": {"safety_tokens": 10, "compression_trigger_ratio": 1.0}},
+            {"context_window_tokens": estimate + 10 + 10, "context_management": {"headroom_tokens": 0, "safety_tokens": 10, "compression_trigger_ratio": 1.0}},
             output_cap=20,
         )
         self.assertEqual(limited["remaining_tokens"], 10)
@@ -211,38 +211,42 @@ class ContextBudgetTests(unittest.TestCase):
         self.assertTrue(limited["needs_compaction"])
         self.assertEqual(limited["generation_reserve_tokens"], 20)
 
-    def test_output_reservation_compacts_instead_of_sending_tiny_output(self):
+    def test_output_uses_context_capacity_instead_of_input_soft_threshold(self):
         context_limit = 10_000
         base = context_budget.estimate_tokens([{"role": "user", "content": ""}], [], "auto")["input_tokens"]
         target_input = 8_900
         messages = [{"role": "user", "content": "x" * (target_input - base)}]
         result = context_budget.plan_budget(
             messages, [], {"model": "auto"},
-            {"context_window_tokens": context_limit, "context_management": {"safety_tokens": 10, "compression_trigger_ratio": 0.9}},
+            {"context_window_tokens": context_limit, "context_management": {"headroom_tokens": 0, "safety_tokens": 10, "compression_trigger_ratio": 0.9}},
             output_cap=384,
         )
         self.assertEqual(result["input_tokens"], target_input)
         self.assertEqual(result["compression_trigger_tokens"], 9_000)
         self.assertEqual(result["compression_trigger_ratio"], 0.9)
-        self.assertEqual(result["effective_output_tokens"], 0)
-        self.assertTrue(result["output_limited_by_context"])
-        self.assertTrue(result["needs_compaction"])
+        self.assertEqual(result["effective_output_tokens"], 384)
+        self.assertFalse(result["output_limited_by_context"])
+        self.assertFalse(result["needs_compaction"])
         self.assertEqual(result["generation_reserve_tokens"], 384)
+        self.assertLess(result["input_tokens"] + 10, result["compression_trigger_tokens"])
+        self.assertGreater(result["input_tokens"] + 384 + 10, result["compression_trigger_tokens"])
+        self.assertLess(result["input_tokens"] + 384 + 10, result["context_limit"])
 
     def test_90_percent_threshold_triggers_compaction_and_ratio_is_configurable(self):
         base = context_budget.estimate_tokens([{"role": "user", "content": ""}], [], "auto")["input_tokens"]
-        messages = [{"role": "user", "content": "x" * (8_990 - base)}]
+        messages = [{"role": "user", "content": "x" * (9_000 - base)}]
         reached = context_budget.plan_budget(
             messages, [], {"model": "auto"},
-            {"context_window_tokens": 10_000, "context_management": {"safety_tokens": 10, "compression_trigger_ratio": 0.9}},
+            {"context_window_tokens": 10_000, "context_management": {"headroom_tokens": 0, "safety_tokens": 10, "compression_trigger_ratio": 0.9}},
             output_cap=384,
         )
         self.assertTrue(reached["needs_compaction"])
-        self.assertEqual(reached["remaining_tokens"], 0)
+        self.assertEqual(reached["input_trigger_remaining_tokens"], 0)
+        self.assertEqual(reached["remaining_tokens"], 990)
 
         configured = context_budget.plan_budget(
             [{"role": "user", "content": "short"}], [], {"model": "auto"},
-            {"context_window_tokens": 10_000, "context_management": {"safety_tokens": 10, "compression_trigger_ratio": 0.8}},
+            {"context_window_tokens": 10_000, "context_management": {"headroom_tokens": 0, "safety_tokens": 10, "compression_trigger_ratio": 0.8}},
             output_cap=100,
         )
         self.assertEqual(configured["compression_trigger_tokens"], 8_000)

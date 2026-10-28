@@ -22,7 +22,7 @@
   "night": {
     "model": "deepseek-v4.1-flash-1017",
     "reasoning_effort": "max",
-    "max_tokens": 393216
+    "max_tokens": 256000
   },
   "connect_timeout_seconds": 30,
   "read_timeout_seconds": 300,
@@ -35,8 +35,10 @@
     "tool_max_chars": 24000,
     "tool_max_lines": 250,
     "auto_output_reserve_tokens": 393216,
-    "compression_trigger_ratio": 0.9,
-    "inline_material_token_limit": 100000
+    "compression_trigger_ratio": 0.8,
+    "inline_material_token_limit": 100000,
+    "headroom_tokens": 65536,
+    "retain_recent_ratio": 0.16
   },
   "model_catalog_file": "assets/bailian_catalog_cache.json"
 }

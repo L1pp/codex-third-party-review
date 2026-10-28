@@ -30,6 +30,7 @@ class CatalogIntegrationTests(unittest.TestCase):
 
     def test_known_provider_ceilings_tighten_route_and_real_wire_budget(self):
         config = self.config(cache_for(context=10000, output=5000))
+        config["context_management"]["headroom_tokens"] = 0
         route = review.select_route(config, NIGHT)
         self.assertEqual(route["context_window_tokens"], 10000)
         self.assertEqual(route["max_tokens"], 5000)
@@ -38,7 +39,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         self.assertEqual(budget["context_limit"], 10000)
         payload = review.make_payload({}, workflow._review_route_with_budget(route, budget), chat_messages=messages)
         self.assertLessEqual(payload["max_tokens"], 5000)
-        self.assertLessEqual(budget["input_tokens"] + payload["max_tokens"] + budget["safety_tokens"], budget["compression_trigger_tokens"])
+        self.assertLessEqual(budget["input_tokens"] + payload["max_tokens"] + budget["safety_tokens"], budget["context_limit"])
 
     def test_catalog_never_expands_an_explicit_smaller_limit(self):
         config = self.config(cache_for())
@@ -84,7 +85,7 @@ class CatalogIntegrationTests(unittest.TestCase):
                     (folder / "bad.json").write_text(content, encoding="utf-8")
                 with self.subTest(content=content), patch("bailian_catalog.subprocess.run", side_effect=AssertionError("no command allowed")):
                     route = review.select_route(review.prepare_config(config, folder / "config.json"), NIGHT)
-                    self.assertEqual(route["max_tokens"], 393216)
+                    self.assertEqual(route["max_tokens"], 256000)
                     self.assertNotIn("model_catalog", route)
 
     def test_length_recovery_compaction_obeys_provider_and_smaller_user_caps(self):

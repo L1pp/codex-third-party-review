@@ -304,12 +304,17 @@ def plan_budget(messages, tools, route, config, output_cap=None):
         context_limit = min(context_limit, _nonnegative_int(selected_context, "route.context_window_tokens"))
     management = config.get("context_management") or {}
     safety_tokens = _nonnegative_int(management.get("safety_tokens", 2048), "safety_tokens")
-    compression_trigger_ratio = management.get("compression_trigger_ratio", 0.90)
+    compression_trigger_ratio = management.get("compression_trigger_ratio", 0.80)
     if isinstance(compression_trigger_ratio, bool) or not isinstance(compression_trigger_ratio, (int, float)):
         raise ValueError("compression_trigger_ratio must be a number between 0 and 1")
     if not 0 < compression_trigger_ratio <= 1:
         raise ValueError("compression_trigger_ratio must be greater than 0 and at most 1")
     compression_trigger_tokens = math.floor(context_limit * compression_trigger_ratio)
+    headroom_tokens = max(safety_tokens, _nonnegative_int(
+        management.get("headroom_tokens", 65_536), "headroom_tokens"))
+    retain_ratio = management.get("retain_recent_ratio", 0.16)
+    if isinstance(retain_ratio, bool) or not isinstance(retain_ratio, (int, float)) or not 0 <= retain_ratio < 1:
+        raise ValueError("retain_recent_ratio must be a number at least zero and less than one")
     route_input_limit = route.get("max_input_tokens")
     if route_input_limit is not None:
         route_input_limit = _nonnegative_int(route_input_limit, "route.max_input_tokens")
@@ -345,13 +350,21 @@ def plan_budget(messages, tools, route, config, output_cap=None):
             "auto_output_reserve_tokens",
         )
 
-    remaining = compression_trigger_tokens - estimate["input_tokens"] - safety_tokens
-    # Reserve the complete configured generation budget before a review call.
-    # An input-only trigger could leave just a few thousand reasoning tokens;
-    # compact first instead of sending such a reduced request to the provider.
+    # DSH compaction-basic: reserve the configured completion, then apply
+    # headroom independently of the input-history ratio. The safety margin is
+    # included in headroom, rather than deducted a second time.
+    remaining = context_limit - estimate["input_tokens"] - safety_tokens
     generation_reserve = min(requested_output_tokens, route_output_cap) if route_output_cap is not None else requested_output_tokens
-    output_budget_exceeds_context = generation_reserve >= compression_trigger_tokens - safety_tokens
-    needs_compaction = remaining <= generation_reserve or estimate["input_tokens"] >= compression_trigger_tokens - safety_tokens
+    input_trigger = compression_trigger_tokens
+    if route_input_limit is not None:
+        input_trigger = min(input_trigger, route_input_limit - safety_tokens)
+    pressure_trigger = context_limit - generation_reserve - headroom_tokens
+    effective_trigger = min(input_trigger, pressure_trigger)
+    input_trigger_remaining = input_trigger - estimate["input_tokens"]
+    output_budget_exceeds_context = pressure_trigger <= 0
+    input_trigger_reached = estimate["input_tokens"] >= input_trigger
+    output_reservation_reached = estimate["input_tokens"] >= pressure_trigger
+    needs_compaction = input_trigger_reached or output_reservation_reached
     if split_output_budget and generation_reserve < 2:
         needs_compaction = True
     effective_output_tokens = 0 if needs_compaction else generation_reserve
@@ -377,7 +390,14 @@ def plan_budget(messages, tools, route, config, output_cap=None):
         "effective_output_tokens": effective_output_tokens,
         "output_limited_by_context": effective_output_tokens < requested_output_tokens,
         "needs_compaction": needs_compaction,
-        "compaction_reason": ("output_reservation" if remaining <= generation_reserve else "input_trigger") if needs_compaction else None,
+        "compaction_reason": ("input_trigger" if input_trigger_reached else "output_reservation") if needs_compaction else None,
+        "budget_policy": "dsh_completion_reservation_and_headroom",
+        "headroom_tokens": headroom_tokens,
+        "retain_recent_ratio": retain_ratio,
+        "retain_recent_tokens": math.floor(max(0, context_limit - generation_reserve) * retain_ratio),
+        "input_trigger_remaining_tokens": input_trigger_remaining,
+        "output_reservation_limit_tokens": context_limit,
+        "effective_input_trigger_tokens": effective_trigger,
         "output_budget_exceeds_context": output_budget_exceeds_context,
         "generation_reserve_tokens": generation_reserve,
         "split_output_budget": split_output_budget,

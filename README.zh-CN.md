@@ -135,11 +135,11 @@ mkdir -p "$HOME/.config/third-party-code-review"
 | 工作流开始时的北京时间 | 请求模型 | 审阅阶段思考与输出配置 |
 | --- | --- | --- |
 | 08:00（含）至 22:00（不含） | `auto` | 正文 131,072、思考 262,144 的本地假设，合并发送 `max_completion_tokens=393216` |
-| 22:00（含）至次日 08:00（不含） | `deepseek-v4.1-flash-1017` | `reasoning_effort=max`，`max_tokens=393216` |
+| 22:00（含）至次日 08:00（不含） | `deepseek-v4.1-flash-1017` | `reasoning_effort=max`，`max_tokens=256000` |
 
 一次工作流开始时选择路由；同一轮取材或压缩续审跨过边界也不会中途换模型。checkpoint 压缩使用独立的较小输出预算，但不切换已选模型。`auto` 由服务端决定实际路由，本项目不能据此确认背后的模型。表中上限是配置与已知服务适配假设，不是任意账号、任意模型的实时能力保证。
 
-默认上下文为 1,000,000 token，优先内联约 100,000 个本地估算 token 的材料，在预计输入、完整输出预留和安全余量达到 90% 阈值前压缩续审。即使初始材料全部内联，仓库探索工具仍可使用，审阅者可以自行查找调用方、契约、配置和相关测试，无需主会话逐文件复制。本地估算不等于服务端 `usage`。DeepSeek 原生计数依赖由独立运行环境准备，auto 仍明确使用保守估算，详见 [架构与边界](docs/architecture.md)。
+默认上下文为 1,000,000 token，优先内联约 100,000 个本地估算 token 的材料。DeepSeek 采用已发布 DSH 的 256,000 输出默认值，保持 max 思考。每次请求前预留完整输出和 65,536 token 余量，以窗口的 80% 和剩余输入预算中较小者判断压力（DeepSeek 默认预计输入阈值为 678,464）。达到压力阈值后先本地缩减可重读的旧工具结果，必要时摘要旧进度并保留完整近期对话；不在生成中强制截流压缩。即使初始材料全部内联，仓库探索工具仍可使用，审阅者可以自行查找调用方、契约、配置和相关测试，无需主会话逐文件复制。本地估算不等于服务端 `usage`。DeepSeek 原生计数依赖由独立运行环境准备，auto 仍明确使用保守估算，详见 [架构与边界](docs/architecture.md)。
 
 **如果不想按时间切换：**修改 `config.json` 中的完整 `day` / `night` 路由，不要只改模型名、却留下另一个模型的思考和输出参数。例如全天使用 DeepSeek 时，用下面的两段替换原有 `day` / `night`，保留其他顶层字段：
 
@@ -150,12 +150,12 @@ mkdir -p "$HOME/.config/third-party-code-review"
     "end": "22:00",
     "model": "deepseek-v4.1-flash-1017",
     "reasoning_effort": "max",
-    "max_tokens": 393216
+    "max_tokens": 256000
   },
   "night": {
     "model": "deepseek-v4.1-flash-1017",
     "reasoning_effort": "max",
-    "max_tokens": 393216
+    "max_tokens": 256000
   }
 }
 ```

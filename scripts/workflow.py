@@ -7,10 +7,12 @@ import time
 
 try:  # importable both as scripts.workflow and directly from scripts/
     from .context_budget import plan_budget
+    from .history_cleanup import prune_old_reads, split_history
     from .materials import MaterialStore
     from .review_contract import SYSTEM_PROMPT, task_title
 except ImportError:  # pragma: no cover - exercised by the CLI import mode
     from context_budget import plan_budget
+    from history_cleanup import prune_old_reads, split_history
     from materials import MaterialStore
     from review_contract import SYSTEM_PROMPT, task_title
 
@@ -511,6 +513,8 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
             "count_warning": inline_bundle.get("count_warning"),
         },
         "inline_budget_reductions": [],
+        "history_cleanup_events": [],
+        "checkpoint_history": [],
         "_started_monotonic": started_mono,
     }
     _write_json(root / "workflow.json", workflow)
@@ -536,6 +540,7 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
         nonlocal inline_materials, inline_delivered_ranges, tools, allowed_tool_names, messages
         if inline_limit <= 0 or not inline_materials:
             return False
+        retained_messages = messages[2:] if checkpoint else []
         previous_limit = inline_limit
         inline_limit = previous_limit // 2
         if inline_limit == previous_limit:
@@ -549,7 +554,7 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
             messages = _messages_for_review(
                 task_context, material_index, inline_materials=inline_materials,
                 checkpoint=checkpoint, exploration=exploration,
-            )
+            ) + retained_messages
         estimate_method = str(budget.get("method") or "")
         reduction_reason = (
             "auto UTF-8 upper-bound estimate crossed the configured context compression trigger"
@@ -598,6 +603,7 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
         return None
 
     messages_are_checkpoint_base = True
+    compaction_input_before = None
 
     def do_call(stage, request_messages, request_tools, request_route, budget, output_cap=None):
         nonlocal call_number, final_result
@@ -655,11 +661,15 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
                 final_result = child
         return child, call_dir
 
-    def compact_checkpoint(current_messages, reason, latest_result=None, latest_dir=None):
-        """Summarize progress and return a fresh, minimal review conversation."""
+    def compact_checkpoint(current_messages, reason, latest_result=None, latest_dir=None, review_budget=None):
+        """Summarize older progress and keep a balanced recent tail verbatim."""
+        review_budget = review_budget or budget_for(current_messages, tools, route)
+        older_messages, retained_tail = split_history(
+            current_messages, review_budget.get("retain_recent_tokens", 0), route["model"],
+        )
         completed_work = []
         internal_note_parts = []
-        for message in current_messages:
+        for message in older_messages:
             if not isinstance(message, dict):
                 continue
             if message.get("role") == "user":
@@ -710,8 +720,8 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
             if isinstance(effective, int) and effective < requested_cap:
                 if effective <= 0:
                     return None
-                # Apply the same output ceiling below the active compression
-                # threshold too; compaction calls must not cross the configured threshold.
+                # Input-history compaction and physical context capacity are
+                # distinct; any compaction output must fit the real context.
                 requested_cap = effective
                 compact_route = _compression_route(route, requested_cap)
             if compact_budget.get("needs_compaction"):
@@ -872,6 +882,14 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
                 return None
 
         workflow["last_compaction_reason"] = reason
+        workflow["retained_recent_messages"] = len(retained_tail)
+        # Each checkpoint is retained separately; checkpoint.txt remains the
+        # compatible pointer to the latest one. Existing call logs are untouched.
+        checkpoint_dir = root / "checkpoints"
+        checkpoint_dir.mkdir(exist_ok=True)
+        revision_path = checkpoint_dir / ("%04d.txt" % (len(workflow["checkpoint_history"]) + 1))
+        revision_path.write_text(checkpoint, encoding="utf-8")
+        workflow["checkpoint_history"].append(str(revision_path.resolve()))
         checkpoint_path = root / "checkpoint.txt"
         checkpoint_path.write_text(checkpoint, encoding="utf-8")
         workflow["checkpoint_file"] = str(checkpoint_path.resolve())
@@ -889,7 +907,7 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
         return _messages_for_review(
             task_context, resume_index, inline_materials=inline_materials,
             checkpoint=checkpoint, exploration=exploration,
-        )
+        ) + retained_tail
 
     if dry_run:
         try:
@@ -923,17 +941,39 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
             workflow["uncompleted_reason"] = str(exc)
             break
         if budget.get("needs_compaction"):
+            # Local cleanup runs only after pressure qualifies. It changes the
+            # next request view, never previously logged requests or snapshots.
+            cleaned_messages, cleanup_counts = prune_old_reads(
+                messages, budget.get("retain_recent_tokens", 0), route["model"],
+            )
+            if any(cleanup_counts.values()):
+                cleaned_budget = budget_for(cleaned_messages, tools, route)
+                if cleaned_budget["input_tokens"] < budget["input_tokens"]:
+                    workflow["history_cleanup_events"].append({
+                        **cleanup_counts, "before_tokens": budget["input_tokens"],
+                        "after_tokens": cleaned_budget["input_tokens"],
+                    })
+                    messages, budget = cleaned_messages, cleaned_budget
+                    _write_json(root / "workflow.json", workflow)
+                    if not budget.get("needs_compaction"):
+                        continue
             if messages_are_checkpoint_base and inline_materials and inline_limit > 0:
                 checkpoint = checkpoint_from_messages(messages)
                 if shrink_inline_context(budget, checkpoint=checkpoint):
                     continue
-            fresh_messages = compact_checkpoint(messages, budget.get("compaction_reason") or "history_budget")
+            if compaction_input_before is not None and budget["input_tokens"] >= compaction_input_before:
+                workflow["status"] = "incomplete"
+                workflow["uncompleted_reason"] = "Checkpoint did not reduce an over-budget request; original progress was preserved without repeating the same compaction."
+                break
+            compaction_input_before = budget["input_tokens"]
+            fresh_messages = compact_checkpoint(messages, budget.get("compaction_reason") or "history_budget", review_budget=budget)
             if fresh_messages is None:
                 workflow["status"] = "incomplete"
                 break
             messages = fresh_messages
             messages_are_checkpoint_base = True
             continue
+        compaction_input_before = None
         review_route = _review_route_with_budget(route, budget)
         call = do_call("review", messages, tools, review_route, budget)
         if call is None:
@@ -981,6 +1021,11 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
                             tool_result = {"error": "Material read failed (%s)." % type(exc).__name__}
                 if not isinstance(tool_result, (dict, list, str, int, float, bool)) and tool_result is not None:
                     tool_result = {"error": "Material function returned an unsupported value."}
+                # Save the full local delivery before any future request-view
+                # cleanup. No source text is copied into workflow/ledger events.
+                with (root / "tool_results.jsonl").open("a", encoding="utf-8") as log:
+                    log.write(_dump({"index": len(tool_trace) + 1, "tool_call_id": call_item["id"],
+                                     "name": name, "arguments": raw_arguments, "result": tool_result}) + "\n")
                 is_error = isinstance(tool_result, dict) and bool(tool_result.get("error"))
                 tool_trace.append({
                     "name": name,
@@ -1026,6 +1071,7 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
                 "length_termination",
                 latest_result=child,
                 latest_dir=call_dir,
+                review_budget=budget,
             )
             if fresh_messages is None:
                 workflow["status"] = "incomplete"
