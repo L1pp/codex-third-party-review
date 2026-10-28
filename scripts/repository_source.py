@@ -11,8 +11,10 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import subprocess
 
 try:
+    from .atomic_io import atomic_write_json
     from .materials import MaterialStore
 except ImportError:
+    from atomic_io import atomic_write_json
     from materials import MaterialStore
 
 
@@ -26,16 +28,33 @@ _PRIVATE_NAMES = {'credentials.json', 'auth.json', 'id_rsa', 'id_dsa', 'id_ecdsa
                   '.netrc', '.npmrc', '.pypirc', 'api-key.txt', 'api_key.txt', 'deepseek-api-key.txt',
                   'secrets.json', 'secrets.yaml', 'secrets.yml', 'credentials.yaml', 'credentials.yml',
                   '.git-credentials', '.htpasswd', 'report_diagnostics.json', 'adjudication.json',
-                  'private-decisions.json'}
+                  'private-decisions.json', 'local_io_errors.jsonl'}
 _PRIVATE_SUFFIXES = {'.pem', '.key', '.p12', '.pfx', '.keystore'}
 _PRIVATE_ROOT_DIRS = {'logs', 'artifacts', 'outputs', 'reviews', '.review', '.third-party-review'}
+# Exact known sidecars only. Ordinary project JSON and .tmp files stay readable.
+_ATOMIC_RUNTIME_RECORDS = {
+    'request.json', 'result.json', 'workflow.json', 'progress.json', 'token_budget.json',
+    'materials.json', 'response_metadata.json', 'report_diagnostics.json',
+    'adjudication.json', 'private-decisions.json', 'local_io_errors.jsonl',
+}
+
+
+def _runtime_temporary_name(name):
+    if not name.endswith('.tmp'):
+        return False
+    stem = name[:-4]
+    if stem in _ATOMIC_RUNTIME_RECORDS or (stem.startswith('adjudication-input') and stem.endswith('.json')):
+        return True  # Legacy fixed-name temporary.
+    base, separator, token = stem.rpartition('.')
+    return bool(separator and token and (base in _ATOMIC_RUNTIME_RECORDS
+                or (base.startswith('adjudication-input') and base.endswith('.json'))))
 
 
 def _private_name(name):
     name = name.casefold()
     environment = (name == '.env' or name.startswith('.env.') or name.endswith('.env'))
     example = name.endswith(('.example', '.sample', '.template'))
-    return (name in _PRIVATE_NAMES or name.startswith('credentials.')
+    return (name in _PRIVATE_NAMES or _runtime_temporary_name(name) or name.startswith('credentials.')
             or (name.startswith('adjudication-input') and name.endswith('.json'))
             or (environment and not example) or Path(name).suffix in _PRIVATE_SUFFIXES)
 
@@ -45,10 +64,7 @@ class RepositoryError(ValueError):
 
 
 def _write_json(path, value):
-    path = Path(path)
-    pending = path.with_suffix(path.suffix + '.tmp')
-    pending.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
-    pending.replace(path)
+    atomic_write_json(path, value)
 
 
 def _run_git(root, args, *, check=True):

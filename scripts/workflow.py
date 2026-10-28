@@ -6,11 +6,13 @@ import re
 import time
 
 try:  # importable both as scripts.workflow and directly from scripts/
+    from .atomic_io import atomic_write_json, local_io_error_metadata
     from .context_budget import plan_budget
     from .history_cleanup import prune_old_reads, split_history
     from .materials import MaterialStore
     from .review_contract import SYSTEM_PROMPT, task_title
 except ImportError:  # pragma: no cover - exercised by the CLI import mode
+    from atomic_io import atomic_write_json, local_io_error_metadata
     from context_budget import plan_budget
     from history_cleanup import prune_old_reads, split_history
     from materials import MaterialStore
@@ -31,13 +33,7 @@ def _json_default(value):
 
 
 def _write_json(path, value):
-    path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, default=_json_default),
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    atomic_write_json(path, value, default=_json_default)
 
 
 def _dump(value):
@@ -247,7 +243,7 @@ def _tool_name_set(tools):
 
 
 def _finish_details(result):
-    return {
+    details = {
         "status": result.get("status"),
         "finish_reason": result.get("finish_reason"),
         "seconds": result.get("seconds"),
@@ -256,6 +252,10 @@ def _finish_details(result):
         "reported_model": result.get("reported_model"),
         "parse_ok": bool(result.get("parse_ok")),
     }
+    for name in ("progress_warning", "local_io_error"):
+        if result.get(name) is not None:
+            details[name] = result[name]
+    return details
 
 
 def _save_outputs(root, workflow, final_result, material_count, tool_trace, read_sources,
@@ -305,6 +305,9 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
             workflow.update(status="incomplete", uncompleted_reason="Report recovery may have lost findings; original response and diagnostics are preserved.")
     except (ImportError, OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
         workflow["report_diagnostics_warning"] = "Derived report diagnostics unavailable (%s)." % type(exc).__name__
+        io_details = local_io_error_metadata(exc)
+        if io_details is not None:
+            workflow.setdefault("local_io_error", io_details)
     if source_store is not None and hasattr(source_store, "repository_manifest"):
         workflow["repository"] = source_store.repository_manifest()
     workflow.update(diagnostic_files)
@@ -351,6 +354,11 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
         ),
     }
     workflow["started_utc"] = started_utc
+    warning_count = sum(bool(call.get("progress_warning")) for call in workflow.get("child_calls", []))
+    workflow["progress_warning_count"] = warning_count
+    if warning_count:
+        workflow["progress_warning"] = "Progress reporting warnings occurred in %d call(s); see child call records." % warning_count
+    workflow["local_io_error_count"] = sum(bool(call.get("local_io_error")) for call in workflow.get("child_calls", [])) + int(bool(workflow.get("local_io_error")))
     _write_json(root / "workflow.json", workflow)
 
     content = _as_text((final_result or {}).get("content"))
@@ -379,6 +387,10 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
         "report_summary": report_summary,
         **diagnostic_files,
         "report_diagnostics_warning": workflow.get("report_diagnostics_warning"),
+        "progress_warning_count": workflow.get("progress_warning_count", 0),
+        "progress_warning": workflow.get("progress_warning"),
+        "local_io_error_count": workflow.get("local_io_error_count", 0),
+        "local_io_error": workflow.get("local_io_error"),
         "repository": workflow.get("repository"),
     }
     _write_json(root / "result.json", result)
@@ -399,6 +411,10 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
         "report_summary": report_summary,
         **diagnostic_files,
         "report_diagnostics_warning": workflow.get("report_diagnostics_warning"),
+        "progress_warning_count": workflow.get("progress_warning_count", 0),
+        "progress_warning": workflow.get("progress_warning"),
+        "local_io_error_count": workflow.get("local_io_error_count", 0),
+        "local_io_error": workflow.get("local_io_error"),
     }
     report = "# 独立第三方代码审阅工作流\n\n"
     report += "工作流状态：`%s`。由主会话核实和裁决；失败、不完整或缺少报告不表示审阅通过。\n\n" % status
@@ -448,6 +464,9 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
             "_started_monotonic": started_mono,
             "uncompleted_reason": "Review preparation failed (%s); no model request started." % type(exc).__name__,
         }
+        io_details = local_io_error_metadata(exc)
+        if io_details is not None:
+            failed["local_io_error"] = io_details
         return _save_outputs(root, failed, None, 0, [], [], started_utc)
     if source_factory is not None:
         packet = store.packet
@@ -648,6 +667,9 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
                 "error_message": "Local provider-call orchestration failed; no automatic retry was made",
                 "content": "",
             }
+            io_details = local_io_error_metadata(exc)
+            if io_details is not None:
+                child["local_io_error"] = io_details
         call_meta.update(_finish_details(child))
         call_meta["status"] = child.get("status", "error")
         call_meta["error_type"] = child.get("error_type")

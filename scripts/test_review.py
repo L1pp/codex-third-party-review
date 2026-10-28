@@ -1,6 +1,7 @@
 """Offline route/transport tests. No real credentials, model calls, or repository code execution."""
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -295,6 +296,154 @@ class ReviewTests(unittest.TestCase):
         self.assertNotIn("Authorization", serialized_metadata)
         self.assertNotIn("Set-Cookie", serialized_metadata)
         self.assertIn("reasoning.txt", result["response_log_files"])
+
+    def _assert_progress_io_failure_continues_stream(self, persistent):
+        usage = {"prompt_tokens": 10, "completion_tokens": 20,
+                 "completion_tokens_details": {"reasoning_tokens": 15}}
+        reasoning = ["故障前已收到的推理。", "故障后继续收到的推理。"]
+        report = '{"findings": [], "context_gaps": ["only supplied material"]}'
+        response = FakeResponse(events=[
+            {"choices": [{"delta": {"reasoning_content": reasoning[0]}}]},
+            {"choices": [{"delta": {"reasoning_content": reasoning[1]}}]},
+            {"choices": [{"delta": {"content": report[:20]}}]},
+            {"choices": [{"delta": {"content": report[20:]}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": usage}, "[DONE]",
+        ])
+        actual_write = review.write_json
+        failures = []
+        callback_events = []
+        ticks = iter(range(0, 10000, 11))
+
+        def write_with_progress_failure(path, value, key=None, **kwargs):
+            if Path(path).name == "progress.json":
+                self.assertEqual(kwargs.get("replace_retry_seconds"), 0)
+                self.assertIs(kwargs.get("preserve_on_error"), False)
+            if (Path(path).name == "progress.json" and value["reasoning_chars"] > 0
+                    and (persistent or not failures)):
+                failures.append(value["state"])
+                raise PermissionError("private path and " + FAKE_KEY)
+            return actual_write(path, value, key, **kwargs)
+
+        with patch.object(review, "write_json", side_effect=write_with_progress_failure), \
+                patch.object(review.time, "perf_counter", side_effect=lambda: next(ticks)):
+            result, output, _ = self.execute_mock(response, progress_callback=callback_events.append)
+        self.assertTrue(failures)
+        self.assertGreater(len(failures), 1 if persistent else 0)
+        if not persistent:
+            self.assertEqual(len(failures), 1)
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["parse_ok"])
+        self.assertTrue(result["stream_done"])
+        self.assertEqual(result["content"], report)
+        self.assertEqual(result["usage"], usage)
+        self.assertEqual(result["reasoning_chars"], len("".join(reasoning)))
+        self.assertIn("PermissionError", result["progress_warning"])
+        self.assertNotIn("error_type", result)
+        self.assertEqual((output / "reasoning.txt").read_text(encoding="utf-8"), "".join(reasoning))
+        raw_lines = "\n".join(self.recorded_sse_lines(output))
+        self.assertIn(reasoning[1], raw_lines)
+        self.assertIn('"finish_reason": "stop"', raw_lines)
+        self.assertIn('data: [DONE]', raw_lines)
+        self.assertEqual(callback_events[-1]["state"], "completed")
+        self.assertTrue(any(event["state"] == "streaming" and event["reasoning_chars"] > 0
+                            for event in callback_events))
+        saved = review.read_json(output / "result.json")
+        self.assertEqual(saved["progress_warning"], result["progress_warning"])
+        self.assertIn("progress_warning", (output / "report.md").read_text(encoding="utf-8"))
+        self.assertNotIn(FAKE_KEY, json.dumps(saved))
+        self.assertNotIn("private path", json.dumps(saved))
+        record = review.ledger.history(self.ledger_path)["records"][0]
+        self.assertEqual(record["outcome"], "success")
+        self.assertEqual(record["status"], "completed")
+        self.assertIsNone(record["error_type"])
+
+    def test_one_progress_write_failure_after_reasoning_does_not_abort_stream(self):
+        self._assert_progress_io_failure_continues_stream(persistent=False)
+
+    def test_persistent_progress_write_failures_do_not_abort_stream(self):
+        self._assert_progress_io_failure_continues_stream(persistent=True)
+
+    def test_final_progress_write_failure_is_saved_and_callback_still_runs(self):
+        actual_write = review.write_json
+        events = []
+
+        def fail_final_progress(path, value, key=None, **kwargs):
+            if Path(path).name == "progress.json" and value["state"] == "completed":
+                raise OSError("private final path " + FAKE_KEY)
+            return actual_write(path, value, key, **kwargs)
+
+        with patch.object(review, "write_json", side_effect=fail_final_progress):
+            result, output, _ = self.execute_mock(FakeResponse(body={
+                "choices": [{"message": {"content": "[]"}, "finish_reason": "stop"}],
+            }), progress_callback=events.append)
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["parse_ok"])
+        self.assertIn("OSError", review.read_json(output / "result.json")["progress_warning"])
+        self.assertEqual(events[-1]["state"], "completed")
+        self.assertEqual(review.ledger.history(self.ledger_path)["records"][0]["outcome"], "success")
+
+    @unittest.skipUnless(os.name == "nt", "Windows file sharing behavior")
+    def test_windows_open_progress_reader_does_not_abort_stream(self):
+        actual_write = review.write_json
+        reader = []
+        ticks = iter(range(0, 10000, 11))
+        events = []
+
+        def hold_first_progress_reader(path, value, key=None, **kwargs):
+            actual_write(path, value, key, **kwargs)
+            if Path(path).name == "progress.json" and not reader:
+                reader.append(Path(path).open("r", encoding="utf-8"))
+
+        try:
+            with patch.object(review, "write_json", side_effect=hold_first_progress_reader), \
+                    patch.object(review.time, "perf_counter", side_effect=lambda: next(ticks)):
+                result, output, _ = self.execute_mock(FakeResponse(events=[
+                    {"choices": [{"delta": {"reasoning_content": "reasoning before locked replacement"}}]},
+                    {"choices": [{"delta": {"content": "[]"}, "finish_reason": "stop"}]}, "[DONE]",
+                ]), progress_callback=events.append)
+        finally:
+            for handle in reader:
+                handle.close()
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["parse_ok"])
+        self.assertIn("PermissionError", result["progress_warning"])
+        self.assertTrue(result["stream_done"])
+        self.assertIn("data: [DONE]", "\n".join(self.recorded_sse_lines(output)))
+        self.assertEqual(events[-1]["state"], "completed")
+        self.assertEqual(review.ledger.history(self.ledger_path)["records"][0]["outcome"], "success")
+
+    def test_critical_request_write_failure_is_still_a_failed_call(self):
+        actual_write = review.write_json
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        output = Path(temporary.name) / "critical-request"
+
+        def fail_request(path, value, key=None, **kwargs):
+            if Path(path).name == "request.json":
+                raise PermissionError("private request path " + FAKE_KEY)
+            return actual_write(path, value, key, **kwargs)
+
+        with patch.object(review, "write_json", side_effect=fail_request), \
+                patch.object(review, "load_credential", return_value=FAKE_KEY), \
+                patch.object(review.requests, "Session", side_effect=AssertionError("No HTTP after request I/O failure")):
+            result = review.run_review(self.config, {"task": "critical request"}, output)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_type"], "PermissionError")
+        self.assertEqual(review.ledger.history(self.ledger_path)["records"][0]["outcome"], "failure")
+
+    def test_critical_result_write_failure_still_propagates(self):
+        actual_write = review.write_json
+
+        def fail_result(path, value, key=None, **kwargs):
+            if Path(path).name == "result.json":
+                raise PermissionError("critical result unavailable")
+            return actual_write(path, value, key, **kwargs)
+
+        with patch.object(review, "write_json", side_effect=fail_result), \
+                self.assertRaises(PermissionError):
+            self.execute_mock(FakeResponse(body={
+                "choices": [{"message": {"content": "[]"}, "finish_reason": "stop"}],
+            }))
 
     def test_cross_chunk_reasoning_key_is_redacted_before_persistence(self):
         pieces = [FAKE_KEY[:11], FAKE_KEY[11:22], FAKE_KEY[22:]]

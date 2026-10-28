@@ -15,8 +15,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 if __name__ == "__main__":
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from skill_runtime import launch_in_runtime
-    launch_in_runtime(__file__, require_tokenizer=True)
+    from skill_runtime import launch_in_runtime, review_allows_dependency_install
+    launch_in_runtime(__file__, require_tokenizer=True,
+                      allow_install=review_allows_dependency_install(sys.argv[1:]))
 
 import requests
 
@@ -25,6 +26,7 @@ from response_log import ResponseLog
 from bailian_catalog import load_catalog_cache, cache_lookup
 from report_parsing import parse_report_text
 from review_contract import SYSTEM_PROMPT, task_title
+from atomic_io import atomic_write_json, local_io_error_metadata, DEFAULT_REPLACE_RETRY_SECONDS
 
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config.json"
@@ -57,11 +59,8 @@ def redact(value, key):
     return value
 
 
-def write_json(path, value, key=None):
-    path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(redact(value, key), ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+def write_json(path, value, key=None, *, replace_retry_seconds=DEFAULT_REPLACE_RETRY_SECONDS, preserve_on_error=True):
+    atomic_write_json(path, redact(value, key), replace_retry_seconds=replace_retry_seconds, preserve_on_error=preserve_on_error)
 
 
 def config_url(config):
@@ -313,7 +312,7 @@ def write_report(output_dir, result, key):
         "status", "route", "requested_model", "reported_model", "http_status", "finish_reason",
         "stream_done", "completion_warning", "parse_ok", "raw_parse_ok", "report_parse_status", "report_recovery", "parse_warning", "seconds", "usage", "usage_missing", "reasoning_chars",
         "provider_error", "error_type", "error_message", "response_log_files", "response_log_warning",
-        "ledger_id", "ledger_warning") if result.get(name) is not None}
+        "ledger_id", "ledger_warning", "progress_warning", "local_io_error") if result.get(name) is not None}
     fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", content)), default=0))
     report = "# 独立第三方代码审阅\n\n此报告由主会话核实和裁决，不自行决定通过或阻塞。失败或不完整响应不可视为无问题。\n\n"
     report += "## 调用元数据\n\n```json\n" + json.dumps(metadata, ensure_ascii=False, indent=2) + "\n```\n\n"
@@ -396,18 +395,27 @@ def run_review(config, packet, output_dir, dry_run=False, at=None, task_label=No
         if not force and seconds - last_progress < 10:
             return
         last_progress = seconds
-        write_json(output_dir / "progress.json", {
-            "state": state, "route": route, "seconds": seconds,
-            "visible_chars": visible_chars, "reasoning_chars": result["reasoning_chars"],
-            "first_event_seconds": result["first_event_seconds"], "first_content_seconds": result["first_content_seconds"],
-            "updated_utc": datetime.now(timezone.utc).isoformat(),
-        }, key)
+        try:
+            write_json(output_dir / "progress.json", {
+                "state": state, "route": route, "seconds": seconds,
+                "visible_chars": visible_chars, "reasoning_chars": result["reasoning_chars"],
+                "first_event_seconds": result["first_event_seconds"], "first_content_seconds": result["first_content_seconds"],
+                "updated_utc": datetime.now(timezone.utc).isoformat(),
+            }, key, replace_retry_seconds=0, preserve_on_error=False)
+        except OSError as exc:
+            # Progress is advisory. A Windows reader can temporarily prevent
+            # atomic replacement; never interrupt or replay the live request
+            # because its progress sidecar could not be updated.
+            result["progress_warning"] = (
+                "Progress metadata write failed (" + type(exc).__name__ + "); "
+                "the request and response capture continued."
+            )
         if progress_callback is not None:
             try:
                 progress_callback(redact({"state": state, "call": output_dir.name,
                                           "visible_chars": visible_chars, "reasoning_chars": result["reasoning_chars"]}, key))
             except Exception:
-                result["progress_warning"] = "CLI progress output unavailable; review records are preserved"
+                result.setdefault("progress_warning", "CLI progress output unavailable; review records are preserved")
 
     def consume(body, streaming):
         nonlocal visible_chars
@@ -520,6 +528,9 @@ def run_review(config, packet, output_dir, dry_run=False, at=None, task_label=No
         result.update(status="error", error_type="ConfigError", error_message=str(exc))
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         result.update(status="error", error_type=type(exc).__name__, error_message="Credential, local I/O, or response format error; no automatic retry was made")
+        io_details = local_io_error_metadata(exc)
+        if io_details is not None:
+            result["local_io_error"] = io_details
     except KeyboardInterrupt:
         result.update(status="interrupted", error_type="KeyboardInterrupt", error_message="Interrupted by the operator; partial visible output is preserved")
     finally:
@@ -560,11 +571,13 @@ def run_review(config, packet, output_dir, dry_run=False, at=None, task_label=No
                               parsed_report=None, parsed_findings=None,
                               report_recovery={"error": type(exc).__name__, "possible_loss": True},
                               parse_warning="Local report parsing failed; the original response is preserved for host review")
+        # Persist a final-only progress warning in the authoritative result
+        # and report too. The CLI's finished summary still follows this return.
+        progress(result["status"], force=True)
         result = redact(result, key)
         record_call(final=True)
         write_json(output_dir / "result.json", result, key)
         write_report(output_dir, result, key)
-        progress(result["status"], force=True)
     return result
 
 
@@ -664,15 +677,19 @@ def main(argv=None):
         )
         if progress_reporter is not None:
             progress_reporter.finish(result)
-        summary = {name: result.get(name) for name in ("status", "route", "completion_warning", "parse_ok", "parse_warning", "seconds", "usage", "usage_missing", "response_log_files", "response_log_warning", "ledger_id", "ledger_warning", "workflow_status", "model_calls", "compactions", "report_diagnostics_file", "adjudication_file")}
+        summary = {name: result.get(name) for name in ("status", "route", "completion_warning", "parse_ok", "parse_warning", "seconds", "usage", "usage_missing", "response_log_files", "response_log_warning", "ledger_id", "ledger_warning", "workflow_status", "model_calls", "compactions", "report_diagnostics_file", "adjudication_file", "progress_warning", "progress_warning_count", "local_io_error", "local_io_error_count")}
         summary["output_dir"] = str(args.output_dir.resolve())
         print(json.dumps(summary, ensure_ascii=False))
         return 0 if result["status"] in ("completed", "dry_run") else 1
     except ConfigError as exc:
         print(json.dumps({"status": "error", "error": str(exc)}))
         return 2
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, sqlite3.Error, RuntimeError):
-        print(json.dumps({"status": "error", "error": "Invalid configuration, repository, packet, route, output directory, or ledger; no API retry was made"}))
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, sqlite3.Error, RuntimeError) as exc:
+        failure = {"status": "error", "error": "Invalid configuration, repository, packet, route, output directory, or ledger; no API retry was made"}
+        io_details = local_io_error_metadata(exc)
+        if io_details is not None:
+            failure["local_io_error"] = io_details
+        print(json.dumps(failure))
         return 2
 
 

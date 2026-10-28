@@ -329,6 +329,46 @@ class RepositorySourceTests(unittest.TestCase):
         for name in safe:
             with self.subTest(path=name):self.assertIn('ordinary_config',source.execute('read_file',{'path':name})['text'])
 
+    def test_retained_runtime_payloads_are_excluded_without_hiding_ordinary_json_or_tmp(self):
+        private=['local_io_errors.jsonl','adjudication.json.123abcxy.tmp',
+                 'report_diagnostics.json.f9gc3v__.tmp','workflow.json.tmp',
+                 'progress.json.abcdefgh.tmp','result.json.xyz.tmp',
+                 'token_budget.json.12345678.tmp','request.json._123abc_.tmp',
+                 'materials.json.a1b2c3d4.tmp','nested/adjudication-input-batch.json.someid.tmp',
+                 'nested/adjudication-input-legacy.json.tmp']
+        for name in private:self.write(name,'HOST_FAILURE_OR_DECISION_SENTINEL\n')
+        ordinary=['business.json.123abcxy.tmp','app.tmp','ordinary.json',
+                  'business-result.json.xyz.tmp','index.json.123abcxy.tmp',
+                  'state.json.abcdefgh.tmp','result.json']
+        for name in ordinary:self.write(name,'ORDINARY_PROJECT_DATA\n')
+        source=self.source()
+        self.assertNotIn('HOST_FAILURE_OR_DECISION_SENTINEL',json.dumps(source.packet))
+        listed=source.execute('list_files',{})['files']
+        for name in private:
+            with self.subTest(path=name):
+                self.assertIn('error',source.execute('read_file',{'path':name}))
+                self.assertNotIn(name,listed)
+        for name in ordinary:
+            with self.subTest(path=name):
+                self.assertIn('ORDINARY_PROJECT_DATA',source.execute('read_file',{'path':name})['text'])
+
+    def test_explicit_supplement_does_not_bypass_runtime_retention_privacy(self):
+        private=self.write('adjudication.json.12345678.tmp','HOST_VERDICT_SENTINEL\n')
+        with self.assertRaises(sources.RepositoryError):
+            self.source(include_files=[private])
+        ordinary=self.write('normal.json.12345678.tmp','ordinary temporary project data\n')
+        out=Path(self.temp.name).resolve()/'second-review';out.mkdir()
+        source=sources.RepositorySource(self.root,output_dir=out,include_files=[ordinary])
+        self.assertIn('ordinary temporary',source.execute('read_file',{'root':'supplement','path':ordinary.name})['text'])
+
+    def test_symlink_alias_cannot_expose_retained_host_record(self):
+        target=self.write('report_diagnostics.json.12345678.tmp','HOST_VERDICT_SENTINEL\n')
+        try:(self.root/'innocent.py').symlink_to(target)
+        except (OSError,NotImplementedError):self.skipTest('Symlink creation unavailable')
+        source=self.source()
+        self.assertIn('error',source.execute('read_file',{'path':'innocent.py'}))
+        self.assertNotIn('HOST_VERDICT_SENTINEL',json.dumps(source.packet))
+
     def test_private_name_policy_also_applies_to_resolved_symlink_targets(self):
         for i,name in enumerate(['.htpasswd','production.env','adjudication.json','report_diagnostics.json']):
             target=self.write(name,'PRIVATE_TARGET_SENTINEL\n')

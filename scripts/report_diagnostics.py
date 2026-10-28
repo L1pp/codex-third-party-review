@@ -9,17 +9,15 @@ import argparse
 import copy
 from datetime import datetime, timezone
 import json
-import os
 from pathlib import Path
 import re
-import tempfile
 
 
 if __name__ == "__main__":
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from skill_runtime import launch_in_runtime
-    launch_in_runtime(__file__)
+    launch_in_runtime(__file__, allow_install=False)
 
 
 _VERDICTS = {"confirmed", "dismissed", "needs_check"}
@@ -31,9 +29,11 @@ def _utc():
 
 
 try:
+    from .atomic_io import atomic_write_json
     from .report_parsing import findings_from as _findings, parse_report_text
     from .review_contract import normalize_priority
 except ImportError:
+    from atomic_io import atomic_write_json
     from report_parsing import findings_from as _findings, parse_report_text
     from review_contract import normalize_priority
 
@@ -180,17 +180,7 @@ def analyze_report(content, findings=None, sources=()):
 
 
 def _atomic_json(path, value):
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
-                                         prefix=path.name + ".", suffix=".tmp", delete=False) as handle:
-            temporary = Path(handle.name)
-            json.dump(value, handle, ensure_ascii=False, indent=2, allow_nan=False)
-            handle.write("\n")
-        os.replace(temporary, path)
-    finally:
-        if temporary is not None and temporary.exists():
-            temporary.unlink()
+    atomic_write_json(path, value, allow_nan=False, trailing_newline=True)
 
 
 def _review_directory(review_dir):

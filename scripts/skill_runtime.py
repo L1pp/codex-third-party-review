@@ -11,7 +11,8 @@ import sys
 import venv
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
-DEPENDENCIES = ("requests", "tzdata", "json-repair", "tokenizers", "Jinja2")
+DEPENDENCIES = ("requests", "tzdata", "json-repair", "tenacity", "tokenizers", "Jinja2")
+PINNED_DEPENDENCIES = {"json-repair": "0.64.2", "tenacity": "9.2.1"}
 PYTHON_ENV_KEYS = ("PYTHONHOME", "PYTHONPATH", "PYTHONUSERBASE", "PYTHONSTARTUP")
 
 
@@ -38,16 +39,47 @@ def runtime_info(root=SKILL_ROOT):
             "using_skill_runtime": using_skill_runtime(root)}
 
 
+def dependency_versions():
+    """Metadata-only readiness, including pinned parser and local-I/O policy."""
+    from importlib.metadata import version
+    versions = {name: version(name) for name in DEPENDENCIES}
+    for name, expected in PINNED_DEPENDENCIES.items():
+        if versions[name] != expected:
+            raise RuntimeError("Skill runtime needs " + name + "==" + expected)
+    return versions
+
+
+def _install_dependencies(root):
+    # Bootstrap output goes to stderr, preserving CLI stdout's JSON contract.
+    subprocess.run([str(runtime_python(root)), "-I", "-m", "pip", "install", "-r",
+                    str(Path(root) / "requirements-tokenizer.txt")],
+                   env=clean_environment(root), stdout=sys.stderr, check=True)
+
+
+def ensure_runtime_dependencies(root=SKILL_ROOT, *, allow_install=False):
+    """Check dependencies; install only for an explicitly live review entry."""
+    from importlib import invalidate_caches
+    from importlib.metadata import PackageNotFoundError
+    try:
+        return dependency_versions()
+    except (PackageNotFoundError, RuntimeError):
+        if not allow_install:
+            raise RuntimeError("Skill runtime dependencies are incomplete; run scripts/skill_runtime.py setup") from None
+        _install_dependencies(root)
+        invalidate_caches()
+        return dependency_versions()
+
+
 def check_runtime(root=SKILL_ROOT):
     """Check installed libraries and local native assets, without a model/network."""
     root = Path(root).resolve()
-    code = ("import sys,json;from pathlib import Path;from importlib.metadata import version;"
-            "sys.path.insert(0,sys.argv[1]);import context_budget;"
+    code = ("import sys,json;from pathlib import Path;"
+            "sys.path.insert(0,sys.argv[1]);import context_budget,atomic_io;from skill_runtime import dependency_versions;"
             "context_budget._TOKENIZER_DIR=Path(sys.argv[2]);"
             "d=context_budget.estimate_tokens([{'role':'user','content':'中文 token check'}],[],'deepseek-v4.1-flash-1017');"
             "assert d['method']=='deepseek_v4_official_tokenizer_template_plus_tool_format_estimate',d;"
             "print(json.dumps({'python':sys.executable,'isolated':bool(sys.flags.isolated),"
-            "'dependencies':{x:version(x) for x in ['requests','tzdata','json-repair','tokenizers','Jinja2']},"
+            "'dependencies':dependency_versions(),"
             "'tokenizer_method':d['method'],'sample_tokens':d['input_tokens']}))")
     completed = subprocess.run([str(runtime_python(root)), "-I", "-c", code,
                                 str(root / "scripts"), str(root / "assets/deepseek_v4_tokenizer")],
@@ -55,8 +87,9 @@ def check_runtime(root=SKILL_ROOT):
     if completed.returncode:
         raise RuntimeError("Skill runtime is incomplete; rerun scripts/skill_runtime.py setup with local tokenizer assets")
     record = json.loads(completed.stdout)
-    if record["dependencies"]["json-repair"] != "0.64.2":
-        raise RuntimeError("Skill runtime needs json-repair==0.64.2; rerun setup")
+    for name, expected in PINNED_DEPENDENCIES.items():
+        if record["dependencies"].get(name) != expected:
+            raise RuntimeError("Skill runtime needs " + name + "==" + expected + "; rerun setup")
     return record
 
 
@@ -67,8 +100,7 @@ def setup_runtime(root=SKILL_ROOT, *, source_dir=None, source_zip=None, download
         raise RuntimeError("Existing .venv is not a Python virtual environment; it was left unchanged")
     if not runtime_python(root).is_file():
         venv.EnvBuilder(with_pip=True, system_site_packages=False).create(destination)
-    subprocess.run([str(runtime_python(root)), "-I", "-m", "pip", "install", "-r", str(root / "requirements-tokenizer.txt")],
-                   env=clean_environment(root), check=True)
+    _install_dependencies(root)
     assets = root / "assets/deepseek_v4_tokenizer"
     if not all((assets / name).is_file() for name in ("tokenizer.json", "tokenizer_config.json")):
         from install_tokenizer import read_directory, read_zip_file, download_official as download, install_assets
@@ -87,7 +119,12 @@ def setup_runtime(root=SKILL_ROOT, *, source_dir=None, source_zip=None, download
     return record
 
 
-def launch_in_runtime(entry_file, *, require_tokenizer=False):
+def review_allows_dependency_install(arguments):
+    offline = {"--history", "--route-only", "--runtime-info", "--dry-run", "--help", "-h", "--at"}
+    return not any(argument in offline for argument in arguments)
+
+
+def launch_in_runtime(entry_file, *, require_tokenizer=False, allow_install=False):
     """CLI bootstrap, before importing project-installed third-party packages."""
     entry = Path(entry_file).resolve()
     root = entry.parent.parent
@@ -112,17 +149,17 @@ def launch_in_runtime(entry_file, *, require_tokenizer=False):
                     continue
             raise SystemExit(code)
         os.execve(str(executable), command, environment)
-    if require_tokenizer:
-        try:
-            # These imports occur only after the isolated interpreter is active.
-            from importlib.metadata import version
-            if version("json-repair") != "0.64.2":
-                raise RuntimeError("Unexpected JSON recovery dependency")
+    try:
+        # Check before importing the runner's third-party modules. Older Skill
+        # live review environments may acquire newly required dependencies.
+        # Read-only/offline entries only check and direct the caller to setup.
+        ensure_runtime_dependencies(root, allow_install=allow_install)
+        if require_tokenizer:
             from context_budget import _load_deepseek_assets
             _load_deepseek_assets()
-        except Exception:
-            print("Skill runtime dependencies/tokenizer are incomplete; rerun scripts/skill_runtime.py setup", file=sys.stderr)
-            raise SystemExit(2) from None
+    except Exception:
+        print("Skill runtime dependencies/tokenizer are incomplete; rerun scripts/skill_runtime.py setup", file=sys.stderr)
+        raise SystemExit(2) from None
 
 
 def main(argv=None):

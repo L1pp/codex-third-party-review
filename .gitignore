@@ -56,3 +56,10 @@ private-decisions.json
 # Full local tool deliveries before request-history cleanup
 tool_results.jsonl
 checkpoints/
+
+# Uncommitted private JSON payloads retained after a failed local commit
+*.json.*.tmp
+*.json.tmp
+
+# Safe local file-failure locator events
+local_io_errors.jsonl

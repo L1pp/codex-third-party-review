@@ -5,3 +5,6 @@ tzdata>=2025.2
 
 # Local recovery of malformed model JSON; does not call a model.
 json-repair==0.64.2
+
+# Bounded retry policy for local atomic file replacement only; never HTTP/model retries.
+tenacity==9.2.1
