@@ -173,7 +173,8 @@ Other useful settings:
 | `base_url` | HTTPS base URL; the script appends `/chat/completions`. Do not include that suffix twice. |
 | `model_catalog_file` | Optional public-catalog cache; relative to the configuration file's directory. Missing cache is allowed; reviews never refresh it implicitly. |
 | `ledger_file` | Optional SQLite ledger path; relative paths use the command's working directory. Prefer an absolute path. Defaults to the Skill's `logs/` directory. |
-| `automatic_retries` | Keep `0`; provider failures do not trigger automatic retries or model switching. |
+| `automatic_retries` | Keep `0`; each low-level call is one recorded attempt. Recovery is managed by the workflow below. |
+| `api_recovery.retry_window_seconds` | Defaults to `120`; elapsed window for starting retries of a temporary failure before usable output. `0` disables those retries. |
 | `context_management.max_model_calls` / `max_compactions` | `null` by default, with no fixed count limit. Positive integers limit counts. Legacy `0` also means unlimited, not disabled. |
 
 One review workflow may make multiple material-reading or compaction requests. Real requests consume your external service's quota or credits.
@@ -287,6 +288,20 @@ Inspect local call summaries without calling a model:
 ```text
 python scripts/review.py --config config.json --history --outcome success --slowest --limit 10
 ```
+
+### Recovery and resuming an unfinished review
+
+Temporary capacity or transport failures before generated output can retry the same request within the configured recovery window, honoring `Retry-After` with jittered backoff otherwise. Once reasoning or text has arrived, a deadline or interrupted stream can produce a checkpoint and continue the review. Authentication, parameter, policy, local I/O errors and operator cancellation do not trigger automatic recovery. The model is retained throughout.
+
+To continue an ended, unfinished run in a new directory:
+
+```text
+python scripts/review.py --config config.json --resume "/path/to/unfinished-review" --output-dir "/path/to/new-review"
+```
+
+Resume keeps the recorded model settings and captured file versions; newly explored files use the current selected repository view and are distinguished in the source records. The configured endpoint must match the original service. Add `--dry-run` to check restored materials and the current budget without a model call; `checkpoint_pending` means the progress summary will be generated only during the real run.
+
+Every actual attempt retains its own directory and ledger entry. Failed-request time and retry waits are separated from successful-request time; the original run and its usage are retained without being charged again as new calls. Recovery can consume additional service quota and does not guarantee a completed report. See [recovery details](docs/architecture.md#api-异常恢复与跨进程续跑) for the classification and recording boundaries.
 
 ### Packet mode: compatibility and replay
 

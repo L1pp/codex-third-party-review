@@ -27,7 +27,7 @@ _SKIP_DIRS = {'.git', '.hg', '.svn', 'node_modules', '.venv', 'venv', '__pycache
 _PRIVATE_NAMES = {'credentials.json', 'auth.json', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519',
                   '.netrc', '.npmrc', '.pypirc', 'api-key.txt', 'api_key.txt', 'deepseek-api-key.txt',
                   'secrets.json', 'secrets.yaml', 'secrets.yml', 'credentials.yaml', 'credentials.yml',
-                  '.git-credentials', '.htpasswd', 'report_diagnostics.json', 'adjudication.json',
+                  '.git-credentials', '.htpasswd', 'report_diagnostics.json', 'adjudication.json', 'resume-state.json',
                   'private-decisions.json', 'local_io_errors.jsonl'}
 _PRIVATE_SUFFIXES = {'.pem', '.key', '.p12', '.pfx', '.keystore'}
 _PRIVATE_ROOT_DIRS = {'logs', 'artifacts', 'outputs', 'reviews', '.review', '.third-party-review'}
@@ -35,7 +35,7 @@ _PRIVATE_ROOT_DIRS = {'logs', 'artifacts', 'outputs', 'reviews', '.review', '.th
 _ATOMIC_RUNTIME_RECORDS = {
     'request.json', 'result.json', 'workflow.json', 'progress.json', 'token_budget.json',
     'materials.json', 'response_metadata.json', 'report_diagnostics.json',
-    'adjudication.json', 'private-decisions.json', 'local_io_errors.jsonl',
+    'adjudication.json', 'private-decisions.json', 'local_io_errors.jsonl', 'resume-state.json',
 }
 
 

@@ -523,7 +523,20 @@ def run_review(config, packet, output_dir, dry_run=False, at=None, task_label=No
     except ProviderError as exc:
         result.update(status="error", error_type="ProviderError", provider_error=exc.details)
     except requests.RequestException as exc:
-        result.update(status="error", error_type=type(exc).__name__, error_message="Transport request failed; no automatic retry was made")
+        # Preserve the concrete exception name for diagnosis, but classify by
+        # Requests' base types so application subclasses keep their semantics.
+        if isinstance(exc, requests.exceptions.SSLError):
+            category = "tls"
+        elif isinstance(exc, requests.Timeout):
+            category = "timeout"
+        elif isinstance(exc, requests.ConnectionError):
+            category = "connection"
+        elif isinstance(exc, (requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError)):
+            category = "stream"
+        else:
+            category = "other"
+        result.update(status="error", error_type=type(exc).__name__, transport_error_category=category,
+                      error_message="Transport request failed; this attempt did not retry")
     except ConfigError as exc:
         result.update(status="error", error_type="ConfigError", error_message=str(exc))
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
@@ -586,6 +599,7 @@ def main(argv=None):
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--packet", type=Path, help="Replay an explicitly prepared material packet")
+    source.add_argument("--resume", type=Path, help="Continue an ended unfinished review in a new output directory, keeping its model and captured sources")
     source.add_argument("--repo", type=Path, help="Automatically collect changes and enable read-only repository exploration")
     parser.add_argument("--target", choices=("worktree", "staged", "range"), default="worktree")
     parser.add_argument("--base", help="Base ref for range review; compared at merge-base with HEAD")
@@ -614,12 +628,12 @@ def main(argv=None):
     if args.at and not (args.route_only or args.dry_run):
         parser.error("--at is available only with --route-only or --dry-run")
     reviewing = not (args.route_only or args.history or args.runtime_info)
-    if reviewing and args.repo is None and args.packet is None:
+    if reviewing and args.repo is None and args.packet is None and args.resume is None:
         args.repo = Path.cwd()
     if reviewing and args.packet is not None and args.output_dir is None:
         parser.error("packet mode requires a new --output-dir")
     if reviewing and args.repo is None and (args.target != "worktree" or args.base or args.workspace_root or args.requirement or args.test_evidence or args.include_file or args.execution_context):
-        parser.error("Repository source options cannot be combined with --packet")
+        parser.error("Repository source options require --repo")
     if reviewing and args.repo is not None and args.target == "range" and not args.base:
         parser.error("range review requires --base")
     if reviewing and args.repo is not None and args.target != "range" and args.base:
@@ -638,7 +652,24 @@ def main(argv=None):
             active_key = load_credential(config)
             task_label = redact(task_label, active_key)
         source_factory = None
-        if args.repo is not None:
+        resume_state = None
+        if args.resume is not None:
+            from review_resume import load_resume
+            resume_state = load_resume(args.resume)
+            if resume_state.endpoint != config_url(config):
+                raise ConfigError("Resume endpoint differs from the configured service; refusing a silent provider change")
+            if args.output_dir is None:
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                args.output_dir = DEFAULT_OUTPUT_ROOT / stamp
+            resume_state.validate_output(args.output_dir)
+            args.output_dir.parent.mkdir(parents=True, exist_ok=True)
+            excluded = [args.config.resolve(), ledger_path(config).resolve(), DEFAULT_OUTPUT_ROOT.parent.resolve()]
+            credential_path = config.get("credential_file")
+            if isinstance(credential_path, str):
+                excluded.append(Path(credential_path).expanduser().resolve())
+            source_factory = resume_state.source_factory(config, redactor=lambda value: redact(value, active_key), excluded_paths=excluded)
+            packet = redact(resume_state.packet, active_key)
+        elif args.repo is not None:
             from repository_source import RepositorySource
             if args.output_dir is None:
                 stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -664,6 +695,8 @@ def main(argv=None):
             packet = redact(read_json(args.packet), active_key)
         from workflow import run_workflow
         options = {"source_factory": source_factory} if source_factory is not None else {}
+        if resume_state is not None:
+            options["resume_state"] = resume_state
         progress_reporter = None
         if not args.dry_run and not args.quiet_progress:
             from review_progress import ReviewProgress
@@ -677,7 +710,7 @@ def main(argv=None):
         )
         if progress_reporter is not None:
             progress_reporter.finish(result)
-        summary = {name: result.get(name) for name in ("status", "route", "completion_warning", "parse_ok", "parse_warning", "seconds", "usage", "usage_missing", "response_log_files", "response_log_warning", "ledger_id", "ledger_warning", "workflow_status", "model_calls", "compactions", "report_diagnostics_file", "adjudication_file", "progress_warning", "progress_warning_count", "local_io_error", "local_io_error_count")}
+        summary = {name: result.get(name) for name in ("status", "route", "completion_warning", "parse_ok", "parse_warning", "seconds", "usage", "usage_missing", "response_log_files", "response_log_warning", "ledger_id", "ledger_warning", "workflow_status", "model_calls", "compactions", "report_diagnostics_file", "adjudication_file", "progress_warning", "progress_warning_count", "local_io_error", "local_io_error_count", "timing")}
         summary["output_dir"] = str(args.output_dir.resolve())
         print(json.dumps(summary, ensure_ascii=False))
         return 0 if result["status"] in ("completed", "dry_run") else 1

@@ -27,6 +27,9 @@
   "connect_timeout_seconds": 30,
   "read_timeout_seconds": 300,
   "automatic_retries": 0,
+  "api_recovery": {
+    "retry_window_seconds": 120
+  },
   "context_management": {
     "safety_tokens": 2048,
     "compaction_max_tokens": 16384,

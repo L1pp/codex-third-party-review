@@ -11,6 +11,9 @@ HEADER_ALLOWLIST = {
     "x-dashscope-request-id", "x-aliyun-request-id", "trace-id", "x-trace-id",
     "x-correlation-id", "traceparent",
     "x-amzn-trace-id",
+    "retry-after", "retry-after-ms",
+    "x-ratelimit-limit-requests", "x-ratelimit-remaining-requests", "x-ratelimit-reset-requests",
+    "x-ratelimit-limit-tokens", "x-ratelimit-remaining-tokens", "x-ratelimit-reset-tokens",
 }
 
 

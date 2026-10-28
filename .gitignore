@@ -63,3 +63,6 @@ checkpoints/
 
 # Safe local file-failure locator events
 local_io_errors.jsonl
+
+# Cross-process review provenance (local only)
+resume-state.json

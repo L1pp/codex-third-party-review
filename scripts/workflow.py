@@ -6,12 +6,14 @@ import re
 import time
 
 try:  # importable both as scripts.workflow and directly from scripts/
+    from .api_recovery import classify_failure, retry_wait_seconds, recovery_window_seconds
     from .atomic_io import atomic_write_json, local_io_error_metadata
     from .context_budget import plan_budget
     from .history_cleanup import prune_old_reads, split_history
     from .materials import MaterialStore
     from .review_contract import SYSTEM_PROMPT, task_title
 except ImportError:  # pragma: no cover - exercised by the CLI import mode
+    from api_recovery import classify_failure, retry_wait_seconds, recovery_window_seconds
     from atomic_io import atomic_write_json, local_io_error_metadata
     from context_budget import plan_budget
     from history_cleanup import prune_old_reads, split_history
@@ -354,6 +356,19 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
         ),
     }
     workflow["started_utc"] = started_utc
+    def seconds_for(call):
+        value = call.get("seconds")
+        return max(0.0, float(value)) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+    child_calls = workflow.get("child_calls", [])
+    workflow["timing"] = {
+        "successful_request_seconds": sum(seconds_for(c) for c in child_calls if c.get("timing_outcome") == "success"),
+        "failed_request_seconds": sum(seconds_for(c) for c in child_calls if c.get("timing_outcome") == "failure"),
+        "incomplete_request_seconds": sum(seconds_for(c) for c in child_calls if c.get("timing_outcome") == "incomplete"),
+        "other_request_seconds": sum(seconds_for(c) for c in child_calls if c.get("timing_outcome") not in {"success", "failure", "incomplete"}),
+        "retry_wait_seconds": workflow.get("retry_wait_seconds", 0.0),
+        # This is a subset of the request timings above, not an additive total.
+        "compaction_request_seconds": sum(seconds_for(c) for c in child_calls if c.get("stage", "").startswith("compaction")),
+    }
     warning_count = sum(bool(call.get("progress_warning")) for call in workflow.get("child_calls", []))
     workflow["progress_warning_count"] = warning_count
     if warning_count:
@@ -392,6 +407,9 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
         "local_io_error_count": workflow.get("local_io_error_count", 0),
         "local_io_error": workflow.get("local_io_error"),
         "repository": workflow.get("repository"),
+        "resume": workflow.get("resume"),
+        "recovery_events": workflow.get("recovery_events", []),
+        "timing": workflow.get("timing"),
     }
     _write_json(root / "result.json", result)
     meta = {
@@ -415,6 +433,9 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
         "progress_warning": workflow.get("progress_warning"),
         "local_io_error_count": workflow.get("local_io_error_count", 0),
         "local_io_error": workflow.get("local_io_error"),
+        "resume": workflow.get("resume"),
+        "recovery_events": workflow.get("recovery_events", []),
+        "timing": workflow.get("timing"),
     }
     report = "# 独立第三方代码审阅工作流\n\n"
     report += "工作流状态：`%s`。由主会话核实和裁决；失败、不完整或缺少报告不表示审阅通过。\n\n" % status
@@ -430,7 +451,7 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
 
 
 def run_workflow(config, packet, output_dir, *, review_call, route_selector,
-                 task_label=None, dry_run=False, at=None, source_factory=None):
+                 task_label=None, dry_run=False, at=None, source_factory=None, resume_state=None):
     """Run one bounded review task using local material tools and the fixed route.
 
     The root directory stores the caller-redacted source packet. Every provider
@@ -441,6 +462,8 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
     if at is not None and not dry_run:
         raise ValueError("at is available only for dry-run workflow preparation")
     root = Path(output_dir)
+    if resume_state is not None:
+        resume_state.validate_output(root)
     root.mkdir(parents=True, exist_ok=False)
     calls_root = root / "calls"
     calls_root.mkdir()
@@ -448,7 +471,9 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
     started_mono = time.perf_counter()
     route = None
     try:
-        route = route_selector(config, at if dry_run else None)
+        route = (dict(resume_state.route) if resume_state is not None else
+                 route_selector(config, at if dry_run else None))
+        retry_window = recovery_window_seconds(config)
         max_calls = _optional_positive_limit(config, "max_model_calls")
         max_compactions = _optional_positive_limit(config, "max_compactions")
         compaction_cap = _positive_limit(config, "compaction_max_tokens", 16384)
@@ -534,11 +559,18 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
         "inline_budget_reductions": [],
         "history_cleanup_events": [],
         "checkpoint_history": [],
+        "recovery_events": [],
+        "retry_wait_seconds": 0.0,
         "_started_monotonic": started_mono,
     }
     _write_json(root / "workflow.json", workflow)
     tool_trace = []
-    read_sources = []
+    read_sources = list(resume_state.read_sources) if resume_state is not None else []
+    delivered_inline_ranges = list(resume_state.inline_delivered_ranges) if resume_state is not None else []
+    if resume_state is not None:
+        workflow["resume"] = resume_state.provenance
+        workflow["inherited_read_sources"] = list(resume_state.read_sources)
+        workflow["inherited_inline_delivered_ranges"] = list(resume_state.inline_delivered_ranges)
     final_result = None
     call_number = 0
     stop = False
@@ -626,68 +658,120 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
 
     def do_call(stage, request_messages, request_tools, request_route, budget, output_cap=None):
         nonlocal call_number, final_result
-        if max_calls is not None and call_number >= max_calls:
-            return None
-        call_number += 1
-        name = "%04d-%s" % (call_number, stage)
-        call_dir = calls_root / name
-        call_meta = {
-            "stage": stage,
-            "directory": str(call_dir.resolve()),
-            "requested_model": request_route.get("model"),
-            "token_budget": budget,
-            "output_cap": output_cap,
-            "status": "requesting",
-        }
-        if stage == "review":
-            call_meta["inline_material_ranges"] = inline_bundle.get("delivered_ranges", [])
-            call_meta["inline_estimated_tokens"] = inline_bundle.get("estimated_tokens")
-            call_meta["inline_estimate_method"] = inline_bundle.get("method")
-            call_meta["inline_overflow_materials"] = inline_bundle.get("remaining_materials", [])
-        workflow["child_calls"].append(call_meta)
-        workflow["status"] = "running"
-        _write_json(root / "workflow.json", workflow)
-        try:
-            child = review_call(
-                config,
-                {"task": label, "stage": stage},
-                call_dir,
-                dry_run=dry_run,
-                at=at if dry_run else None,
-                task_label=(label + " / " + stage + " / step " + str(call_number)),
-                chat_messages=request_messages,
-                tools=request_tools,
-                route_override=request_route,
-                token_budget=budget,
-            )
-        except Exception as exc:
-            child = {
-                "status": "error",
-                "error_type": type(exc).__name__,
-                "error_message": "Local provider-call orchestration failed; no automatic retry was made",
-                "content": "",
+        retry_started = None
+        attempt = 0
+        while True:
+            if retry_started is not None and time.monotonic() - retry_started >= retry_window:
+                call_meta["recovery_stopped"] = "transient_retry_window_exhausted"
+                event["status"] = "window_exhausted"
+                _write_json(root / "workflow.json", workflow)
+                return child, call_dir
+            if max_calls is not None and call_number >= max_calls:
+                return None
+            call_number += 1
+            attempt += 1
+            call_dir = calls_root / ("%04d-%s" % (call_number, stage))
+            call_meta = {
+                "stage": stage, "directory": str(call_dir.resolve()),
+                "requested_model": request_route.get("model"), "token_budget": budget,
+                "output_cap": output_cap, "status": "requesting", "attempt": attempt,
             }
-            io_details = local_io_error_metadata(exc)
-            if io_details is not None:
-                child["local_io_error"] = io_details
-        call_meta.update(_finish_details(child))
-        call_meta["status"] = child.get("status", "error")
-        call_meta["error_type"] = child.get("error_type")
-        call_meta["response_log_files"] = child.get("response_log_files", [])
-        _write_json(root / "workflow.json", workflow)
-        if stage == "review":
-            visible_content = _as_text(child.get("content")).strip()
-            if visible_content and child.get("status") != "error":
-                final_result = child
-            elif final_result is None:
-                final_result = child
-        return child, call_dir
+            if stage == "review":
+                call_meta.update(
+                    inline_material_ranges=inline_bundle.get("delivered_ranges", []),
+                    inline_estimated_tokens=inline_bundle.get("estimated_tokens"),
+                    inline_estimate_method=inline_bundle.get("method"),
+                    inline_overflow_materials=inline_bundle.get("remaining_materials", []),
+                )
+            workflow["child_calls"].append(call_meta)
+            workflow["status"] = "running"
+            _write_json(root / "workflow.json", workflow)
+            try:
+                child = review_call(
+                    config, {"task": label, "stage": stage}, call_dir,
+                    dry_run=dry_run, at=at if dry_run else None,
+                    task_label=(label + " / " + stage + " / step " + str(call_number)),
+                    chat_messages=request_messages, tools=request_tools,
+                    route_override=request_route, token_budget=budget,
+                )
+            except Exception as exc:
+                child = {
+                    "status": "error", "error_type": type(exc).__name__,
+                    "error_message": "Local provider-call orchestration failed",
+                    "content": "", "local_orchestration_error": True,
+                }
+                io_details = local_io_error_metadata(exc)
+                if io_details is not None:
+                    child["local_io_error"] = io_details
+            call_meta.update(_finish_details(child))
+            call_meta.update(status=child.get("status", "error"), error_type=child.get("error_type"),
+                             response_log_files=child.get("response_log_files", []))
+            if stage == "review" and child.get("status") != "tool_calls":
+                # Retain a real partial report if a later empty continuation
+                # fails. Tool-turn narration is never a final report candidate.
+                visible = _as_text(child.get("content")).strip()
+                if (visible and child.get("status") not in {"error", "interrupted"}) or final_result is None or not _as_text(final_result.get("content")).strip():
+                    final_result = child
+            decision = classify_failure(child, reasoning_text=_read_reasoning(child, call_dir, include=True))
+            if stage == "review" and not dry_run and (
+                    child.get("status") in {"completed", "tool_calls"} or decision["has_progress"]):
+                for scope in inline_bundle.get("delivered_ranges", []):
+                    if scope not in delivered_inline_ranges:
+                        delivered_inline_ranges.append(scope)
+            call_meta["recovery_classification"] = decision
+            if dry_run:
+                call_meta["timing_outcome"] = "planned"
+            elif decision["category"] == "length_termination":
+                call_meta["timing_outcome"] = "incomplete"
+            elif decision["action"] == "none" and (
+                    child.get("status") in {"completed", "tool_calls"}
+                    or child.get("finish_reason") in {"stop", "end_turn", "eos"}):
+                call_meta["timing_outcome"] = "success"
+            else:
+                call_meta["timing_outcome"] = "failure"
+            _write_json(root / "workflow.json", workflow)
+            if dry_run or decision["action"] != "retry" or child.get("local_orchestration_error"):
+                return child, call_dir
+            if retry_started is None:
+                retry_started = time.monotonic()
+            remaining = retry_window - (time.monotonic() - retry_started)
+            headers = {}
+            try:
+                metadata = json.loads((call_dir / "response_metadata.json").read_text(encoding="utf-8"))
+                headers = metadata.get("headers") or {}
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+            delay = retry_wait_seconds(attempt, headers=headers)
+            if remaining <= 0 or delay >= remaining or (max_calls is not None and call_number >= max_calls):
+                call_meta["recovery_stopped"] = "transient_retry_window_exhausted"
+                _write_json(root / "workflow.json", workflow)
+                return child, call_dir
+            event = {
+                "action": "retry", "category": decision["category"],
+                "source_directory": str(call_dir.resolve()), "wait_seconds": delay,
+                "started_utc": datetime.now(timezone.utc).isoformat(), "status": "waiting",
+            }
+            workflow["recovery_events"].append(event)
+            _write_json(root / "workflow.json", workflow)
+            wait_started = time.monotonic()
+            try:
+                time.sleep(delay)
+            except KeyboardInterrupt:
+                event["status"] = "cancelled"
+                return {"status": "interrupted", "error_type": "KeyboardInterrupt", "content": ""}, call_dir
+            finally:
+                waited = time.monotonic() - wait_started
+                event["actual_wait_seconds"] = waited
+                workflow["retry_wait_seconds"] += waited
+                event["ended_utc"] = datetime.now(timezone.utc).isoformat()
+                _write_json(root / "workflow.json", workflow)
+            event["status"] = "retrying"
 
-    def compact_checkpoint(current_messages, reason, latest_result=None, latest_dir=None, review_budget=None):
+    def compact_checkpoint(current_messages, reason, latest_result=None, latest_dir=None, review_budget=None, retain_recent_tokens=None):
         """Summarize older progress and keep a balanced recent tail verbatim."""
         review_budget = review_budget or budget_for(current_messages, tools, route)
         older_messages, retained_tail = split_history(
-            current_messages, review_budget.get("retain_recent_tokens", 0), route["model"],
+            current_messages, (review_budget.get("retain_recent_tokens", 0) if retain_recent_tokens is None else retain_recent_tokens), route["model"],
         )
         completed_work = []
         internal_note_parts = []
@@ -730,6 +814,10 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
         # Tool request ranges remain in the local trace but are not a substitute
         # for the actual lines/character offsets returned by the reader.
         delivered_sources = list(read_sources)
+        # A freshly prepared inline bundle has not yet reached the reviewer.
+        # In particular, a restored run may have a larger inline budget than
+        # its predecessor. Summaries must use recorded deliveries only.
+        compaction_index = dict(material_index, inline_delivered_ranges=list(delivered_inline_ranges))
         def plan_compaction(compact_messages, requested_cap):
             compact_route = _compression_route(route, requested_cap)
             requested_cap = compact_route["max_tokens"]
@@ -773,9 +861,9 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
             return "ok", _as_text(child.get("content")).strip()
 
         compact_messages = _messages_for_compaction(
-            task_context, material_index, completed_work, delivered_sources,
+            task_context, compaction_index, completed_work, delivered_sources,
             internal_notes=internal_notes,
-            inline_delivered_ranges=inline_bundle.get("delivered_ranges", []),
+            inline_delivered_ranges=delivered_inline_ranges,
         )
         compact_plan = plan_compaction(compact_messages, compaction_cap)
         checkpoint = None
@@ -792,7 +880,7 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
             # metadata, assistant narrative, and read-location index; source
             # contents and tool error details are never copied into these parts.
             units = []
-            units.append({"section": "materials_index", "value": material_index})
+            units.append({"section": "materials_index", "value": compaction_index})
             for note in completed_work:
                 text = _as_text(note)
                 if not text:
@@ -806,7 +894,7 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
                     units.append({"section": "assistant_reasoning_for_checkpoint", "part": part_number, "value": piece})
             for scope in delivered_sources:
                 units.append({"section": "read_sources", "value": scope})
-            for scope in inline_bundle.get("delivered_ranges", []):
+            for scope in delivered_inline_ranges:
                 units.append({"section": "inline_delivered_ranges", "value": scope})
 
             def segment_messages(segment):
@@ -931,7 +1019,28 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
             checkpoint=checkpoint, exploration=exploration,
         ) + retained_tail
 
+    if resume_state is not None and not dry_run:
+        prior = resume_state.latest_result
+        decision = classify_failure(prior, reasoning_text=_read_reasoning(prior, resume_state.latest_call_dir, include=True))
+        event = {"action": "restore_checkpoint", "category": decision["category"],
+                 "source_directory": str(resume_state.latest_call_dir), "status": "preparing"}
+        workflow["recovery_events"].append(event)
+        fresh_messages = compact_checkpoint(
+            resume_state.review_messages, "resume_" + decision["category"],
+            latest_result=prior, latest_dir=resume_state.latest_call_dir,
+            retain_recent_tokens=0,
+        )
+        if fresh_messages is None:
+            event["status"] = "failed"
+            workflow["status"] = "incomplete"
+            return _save_outputs(root, workflow, None, len(store.index()), tool_trace, read_sources, started_utc, source_store=store)
+        event["status"] = "resuming"
+        messages = fresh_messages
+        messages_are_checkpoint_base = True
+
     if dry_run:
+        if resume_state is not None:
+            workflow["resume"]["checkpoint_pending"] = True
         try:
             initial_budget = budget_for(messages, tools, route)
             while initial_budget.get("needs_compaction") and inline_materials and inline_limit > 0:
@@ -1007,10 +1116,38 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
         finish_reason = child.get("finish_reason")
         tool_calls = _normalise_tool_calls(child.get("tool_calls"))
 
-        if status == "error" or status == "interrupted":
-            # Provider/transport failures are never retried or redirected.
+        decision = classify_failure(child, reasoning_text=_read_reasoning(child, call_dir, include=True))
+        if decision["action"] in {"checkpoint", "context"}:
+            event = {"action": "checkpoint", "category": decision["category"],
+                     "source_directory": str(call_dir.resolve()), "status": "preparing"}
+            workflow["recovery_events"].append(event)
+            fresh_messages = compact_checkpoint(
+                messages, decision["category"], latest_result=child, latest_dir=call_dir,
+                review_budget=budget, retain_recent_tokens=0,
+            )
+            if fresh_messages is None:
+                event["status"] = "failed"
+                workflow["status"] = "incomplete"
+                break
+            messages = fresh_messages
+            messages_are_checkpoint_base = True
+            if decision["action"] == "context":
+                # A provider can enforce a smaller window than local estimates.
+                # Reduce inline data, retaining its readable source and checkpoint.
+                checkpoint = checkpoint_from_messages(messages)
+                reduced = shrink_inline_context(budget, checkpoint=checkpoint)
+                new_budget = budget_for(messages, tools, route)
+                if not reduced and new_budget["input_tokens"] >= budget["input_tokens"]:
+                    event["status"] = "no_context_reduction"
+                    workflow.update(status="incomplete", uncompleted_reason="Provider context rejection persisted without a smaller request; progress preserved.")
+                    break
+            event["status"] = "resuming"
+            continue
+        if status in {"error", "interrupted"}:
             workflow["status"] = "error" if status == "error" else "incomplete"
-            workflow["uncompleted_reason"] = "Provider request ended with status %s; no automatic retry or route change was made." % status
+            workflow["uncompleted_reason"] = "Provider request ended with %s (%s); available recovery stopped and original records are preserved." % (status, decision["category"])
+            if decision["action"] == "stop":
+                workflow["uncompleted_reason"] += " no automatic retry applies."
             break
 
         if finish_reason == "tool_calls" and tools:
@@ -1109,7 +1246,7 @@ def run_workflow(config, packet, output_dir, *, review_call, route_selector,
 
         workflow["status"] = "incomplete"
         workflow["uncompleted_reason"] = (
-            "Provider returned status %s with finish_reason %s; no automatic retry was made."
+            "Provider returned status %s with finish_reason %s; no further recovery applies."
             % (status, finish_reason)
         )
         break

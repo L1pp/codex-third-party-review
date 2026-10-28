@@ -412,6 +412,23 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(events[-1]["state"], "completed")
         self.assertEqual(review.ledger.history(self.ledger_path)["records"][0]["outcome"], "success")
 
+    def test_transport_subclasses_keep_safe_base_category(self):
+        class SpecializedTimeout(review.requests.ReadTimeout):
+            pass
+        class SpecializedConnection(review.requests.ConnectionError):
+            pass
+        cases = [(SpecializedTimeout, "timeout"), (SpecializedConnection, "connection"),
+                 (review.requests.exceptions.ProxyError, "connection"),
+                 (review.requests.exceptions.SSLError, "tls"),
+                 (review.requests.exceptions.ChunkedEncodingError, "stream")]
+        for error, category in cases:
+            with self.subTest(error=error.__name__):
+                result, output, _ = self.execute_mock(FakeResponse(events=[error("private detail " + FAKE_KEY)]))
+                self.assertEqual(result["error_type"], error.__name__)
+                self.assertEqual(result["transport_error_category"], category)
+                self.assertNotIn("private detail", json.dumps(result))
+                self.assertNotIn(FAKE_KEY, (output / "result.json").read_text(encoding="utf-8"))
+
     def test_critical_request_write_failure_is_still_a_failed_call(self):
         actual_write = review.write_json
         temporary = tempfile.TemporaryDirectory()

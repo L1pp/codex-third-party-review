@@ -17,13 +17,17 @@
 | Requests | HTTPS 与 SSE 流读取 | [psf/requests](https://github.com/psf/requests) |
 | tzdata | IANA 时区数据 | [python/tzdata](https://github.com/python/tzdata) |
 | json-repair（必需，MIT） | 本地恢复模型报告的 JSON 语法；不执行模型调用 | [mangiucugna/json_repair](https://github.com/mangiucugna/json_repair) |
-| tenacity（必需，Apache-2.0） | 仅对本地 Windows 原子文件替换处理短时占用；不重试 HTTP/模型 | [jd/tenacity](https://github.com/jd/tenacity) |
+| tenacity（必需，Apache-2.0） | 本地 Windows 原子替换的短时占用重试，以及工作流暂时 API 故障的退避策略 | [jd/tenacity](https://github.com/jd/tenacity) |
 | tokenizers（CLI 默认安装） | 本地分词 | [huggingface/tokenizers](https://github.com/huggingface/tokenizers) |
 | Jinja2（CLI 默认安装） | 渲染本地 chat template | [pallets/jinja](https://github.com/pallets/jinja) |
 
 `json-repair` 按 [MIT 许可证](https://github.com/mangiucugna/json_repair/blob/main/LICENSE) 单独分发，由依赖清单安装；本仓库未复制或内嵌其源码。报告选择、完整性诊断和主会话裁决逻辑仍由本项目实现。安装发行版自带的版权和许可文件继续适用，本项目的 Apache-2.0 不替代它们。
 
-`tenacity==9.2.1` 依据其[发行版许可声明](https://pypi.org/project/tenacity/9.2.1/)以 Apache-2.0 单独分发。本仓库通过依赖安装调用其重试策略，没有复制或内嵌库源码。重试范围只有本地文件提交，不改变供应商请求的重试设置。
+`tenacity==9.2.1` 依据其[发行版许可声明](https://pypi.org/project/tenacity/9.2.1/)以 Apache-2.0 单独分发。本仓库通过依赖安装调用其重试策略，没有复制或内嵌库源码。本地文件提交与 API 恢复分别使用独立策略；API 请求由工作流显式发出，每次 attempt 单独记录，不在 HTTP 客户端中隐藏重试。
+
+## API 恢复设计参考
+
+错误恢复的等待设计参考 [OpenAI Python SDK](https://github.com/openai/openai-python/blob/main/src/openai/_base_client.py) 的暂时错误与 `Retry-After` 处理，checkpoint 衔接参考 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/compaction/compaction-basic/src/index.ts)。本仓库没有复制、内嵌或再分发这些实现，运行时也不依赖这两套 SDK/CLI；本地来源恢复、attempt 留痕和审阅完整性判断为本项目的独立适配。
 
 ## DeepSeek tokenizer（不随仓库分发）
 

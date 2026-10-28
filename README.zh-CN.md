@@ -169,7 +169,8 @@ mkdir -p "$HOME/.config/third-party-code-review"
 | `base_url` | HTTPS 基础地址，脚本追加 `/chat/completions`，不要重复填写该后缀 |
 | `model_catalog_file` | 可选公共目录缓存；相对路径以配置文件目录为基准；缺少时仍可运行，不会隐式联网刷新 |
 | `ledger_file` | 可选 SQLite 台账路径；相对路径以命令当前目录为基准，建议绝对路径；默认在 Skill 的 `logs/` 下 |
-| `automatic_retries` | 保持 `0`；供应商失败不自动重试或切换模型 |
+| `automatic_retries` | 保持 `0`；底层每次调用只执行一次请求，恢复由工作流统一处理 |
+| `api_recovery.retry_window_seconds` | 默认 `120`；无有效生成进度的暂时错误允许启动重试的时间窗口，`0` 禁用这类重试 |
 | `context_management.max_model_calls` / `max_compactions` | 默认 `null`，没有固定次数上限；正整数可限制。`0` 是兼容的无限制别名，不能用于禁止调用 |
 
 一次审阅工作流可能包含多次材料读取与压缩请求，真实调用会消耗外部服务额度。
@@ -283,6 +284,20 @@ python scripts/report_diagnostics.py --review-dir "/path/to/review-output" --dec
 ```text
 python scripts/review.py --config config.json --history --outcome success --slowest --limit 10
 ```
+
+### 异常恢复与继续未完成的审阅
+
+尚未生成有效正文或推理时，暂时容量或传输错误可在恢复窗口内重试同一请求，优先遵守 `Retry-After`，否则使用带抖动的退避。已有推理或正文时，服务端 deadline 或断流可先形成 checkpoint 再继续审阅。认证、参数、策略拒绝、本地 I/O 错误和人工取消不会自动恢复，过程中保留原模型。
+
+已结束的未完成记录可以续跑到新目录：
+
+```text
+python scripts/review.py --config config.json --resume "/path/to/unfinished-review" --output-dir "/path/to/new-review"
+```
+
+续跑保留原模型参数及已捕获的文件版本；新探索的文件按当前所选仓库视图读取，并在来源记录中区分。配置的 endpoint 必须与原服务相同。加 `--dry-run` 仅检查恢复材料和当前预算，不调用模型；`checkpoint_pending` 表示真实运行时才会生成进度摘要。
+
+每次真实请求都有独立目录和台账项，失败耗时、重试等待与成功请求耗时分开记录；原运行及其 usage 保留，不重算为新调用。恢复可能消耗额外额度，也不保证最终形成完整报告。分类和记录边界见[架构说明](docs/architecture.md#api-异常恢复与跨进程续跑)。
 
 ### Packet 模式：兼容与回放
 
