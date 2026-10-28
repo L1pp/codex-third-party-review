@@ -29,7 +29,7 @@ python scripts/bailian_catalog.py lookup --model deepseek-v4.1-flash-1017
 
 本次按 CLI 2.5.1 的 [text/chat 实现](https://github.com/modelstudioai/cli/blob/main/packages/commands/src/commands/text/chat.ts) 核查：它适合一般单次模型调用，但流式 JSON 结果聚合的是 `content`，没有给本工作流完整保留推理、工具调用、用量和终止状态。命令参数也不能直接表达当前 Token Plan 使用的全部推理与组合输出配置。因此没有把请求层简单替换成 `bl text chat`，也没有为包装 TypeScript core 额外增加 Node 桥接进程。
 
-可直接复用的是官方公共目录与现有凭据配置；SSE 换行边界处理作为实现参考并加入真实解码器回归。仓库自动取材、只读探索、90% 压缩续审、完整响应归档、诊断和轻量台账继续由 Python 运行时负责。以后官方 CLI 若提供完整机器可读流事件，再评估收敛请求层；这不是对未来版本能力的判断。
+可直接复用的是官方公共目录与现有凭据配置；SSE 换行边界处理作为实现参考并加入真实解码器回归。仓库自动取材、只读探索、分层清理与压缩续审、完整响应归档、诊断和轻量台账继续由 Python 运行时负责。以后官方 CLI 若提供完整机器可读流事件，再评估收敛请求层；这不是对未来版本能力的判断。
 
 ## 通用 JSON 修复
 
