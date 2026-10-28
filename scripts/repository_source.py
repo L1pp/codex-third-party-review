@@ -86,7 +86,7 @@ class RepositorySource(MaterialStore):
     exploration_enabled = True
 
     def __init__(self, repo_root, *, workspace_roots=(), target='worktree', base=None,
-                 task='', requirements=(), test_evidence=None, output_dir=None,
+                 task='', requirements=(), test_evidence=None, include_files=(), execution_context=(), output_dir=None,
                  max_chars=24000, max_lines=250, redactor=None, excluded_paths=()):
         self._redactor = redactor or (lambda value: value)
         requested = Path(repo_root).expanduser().resolve()
@@ -113,6 +113,21 @@ class RepositorySource(MaterialStore):
             if not root.is_dir():
                 raise RepositoryError('Every workspace root must be an existing directory')
             self.roots['workspace-' + str(index)] = root
+        self._included_paths = []
+        self._execution_context = list(execution_context or ())
+        for file in include_files or ():
+            candidate = Path(file).expanduser()
+            candidate = (candidate if candidate.is_absolute() else self.repo_root / candidate).resolve()
+            try:
+                relative = candidate.relative_to(self.repo_root).as_posix()
+            except ValueError:
+                raise RepositoryError('Supplemental files must be inside the primary repository') from None
+            if not candidate.is_file():
+                raise RepositoryError('Each supplemental path must be an existing file, not a directory')
+            if relative not in self._included_paths:
+                self._included_paths.append(relative)
+        if self._included_paths:
+            self.roots['supplement'] = self.repo_root
         self.output_dir = Path(output_dir).resolve() if output_dir is not None else None
         self._excluded_paths = [Path(p).expanduser().resolve() for p in excluded_paths if p is not None]
         if self.output_dir is not None:
@@ -180,10 +195,14 @@ class RepositorySource(MaterialStore):
         if not isinstance(root, str) or root not in self.roots:
             raise RepositoryError('Unknown root alias')
         relative = self._relative(path, allow_empty=allow_empty)
+        if root == 'supplement' and relative not in self._included_paths:
+            prefix = relative.rstrip('/') + '/' if relative else ''
+            if not allow_empty or not any(item.startswith(prefix) for item in self._included_paths):
+                raise RepositoryError('Only explicitly included supplemental files are available')
         parts = PurePosixPath(relative).parts
         if any(part.casefold() in _SKIP_DIRS for part in parts):
             raise RepositoryError('This path is excluded from source exploration')
-        if parts and parts[0].casefold() in _PRIVATE_ROOT_DIRS:
+        if root != 'supplement' and parts and parts[0].casefold() in _PRIVATE_ROOT_DIRS:
             raise RepositoryError('Local review/runtime output directories are excluded')
         name = parts[-1].casefold() if parts else ''
         if (_private_name(name)
@@ -204,8 +223,10 @@ class RepositorySource(MaterialStore):
         # private file whose real name is otherwise excluded.
         resolved_relative = resolved.relative_to(self.roots[root]).as_posix()
         resolved_parts = PurePosixPath(resolved_relative).parts
-        if resolved_parts and resolved_parts[0].casefold() in _PRIVATE_ROOT_DIRS:
+        if root != 'supplement' and resolved_parts and resolved_parts[0].casefold() in _PRIVATE_ROOT_DIRS:
             raise RepositoryError('The resolved runtime output directory is excluded')
+        if root == 'supplement' and relative in self._included_paths and resolved_relative not in self._included_paths:
+            raise RepositoryError('Supplemental path no longer refers to an included file')
         resolved_name = resolved_parts[-1].casefold() if resolved_parts else ''
         if (any(part.casefold() in _SKIP_DIRS for part in resolved_parts)
                 or _private_name(resolved_name)
@@ -235,6 +256,8 @@ class RepositorySource(MaterialStore):
         return self._workspace_git[root]
 
     def _check_git_ignore(self, root, relative, disk_path):
+        if root == 'supplement':
+            return  # Explicit files only; _check_path still applies credential/output exclusions.
         if not self._is_git_worktree(root):
             return
         # An allowed-looking symlink name cannot expose an ignored target in
@@ -415,9 +438,19 @@ class RepositorySource(MaterialStore):
             data = _run_git(self.repo_root, ['diff', '--no-ext-diff', '--no-textconv', '--function-context', '-M']
                             + self._change_args() + ['--'] + list(dict.fromkeys(paths))).stdout
             diffs.append(self._redact(data.decode('utf-8', errors='replace')))
-        packet = {'task': self._redact(task or 'Review the selected repository changes'),
+        for relative in self._included_paths:
+            capture = self._capture('supplement', relative)
+            if total + capture['bytes_read'] > MAX_INITIAL_BYTES:
+                capture['initial_omitted'] = True
+                self._skip('supplement', relative, 'Initial material limit reached; explicit file remains available through read_file')
+                continue
+            total += capture['bytes_read']
+            files.append({'path': capture['path'], 'content': capture['content'], 'source_id': capture['source_id']})
+        packet = {'task': self._redact(task or ('代码审阅：' + self.repo_root.name + ' (' + self.target + ')')),
                   'requirements': self._redact(list(requirements or ())), 'diff': ''.join(diffs), 'files': files,
                   'scope': self.exploration_context()}
+        if self._execution_context:
+            packet['scope']['execution_context'] = self._redact(self._execution_context)
         if test_evidence is not None:
             if isinstance(test_evidence, Path):
                 if test_evidence.stat().st_size > MAX_FILE_BYTES:
@@ -428,11 +461,15 @@ class RepositorySource(MaterialStore):
         return packet
 
     def exploration_context(self):
-        return {'mode': 'repository', 'target': self.target,
+        context = {'mode': 'repository', 'target': self.target,
                 'roots': [{'alias': alias, 'view': self._view(alias)} for alias in self.roots],
                 'instruction': 'Use list_files/read_file/search_code to investigate callers, contracts and tests within these roots. Initial inline material is not the whole repository. Known deleted repo files remain discoverable in list_files entries and read_file uses their selected baseline (view=base). First-read file contents are cached for this review; captures are not an atomic repository snapshot.',
                 'initial_changes': self._changes[:100], 'initial_changes_total': len(self._changes),
                 'omitted_initial_sources': self._skipped[:50], 'omitted_initial_sources_total': len(self._skipped)}
+        if self._included_paths:
+            context.update(supplemental_files=self._redact(self._included_paths),
+                           supplement_note='supplement exposes only explicitly supplied current-disk files, independently of the selected repo Git view.')
+        return context
 
     def repository_manifest(self):
         return self._redact({'mode': 'repository', 'target': self.target, 'base': self.base,
@@ -461,7 +498,9 @@ class RepositorySource(MaterialStore):
             return self._candidate_cache[root]
         if not isinstance(root, str) or root not in self.roots:
             raise RepositoryError('Unknown root alias')
-        if root == 'repo':
+        if root == 'supplement':
+            paths = self._included_paths[:]
+        elif root == 'repo':
             if self.target == 'range':
                 paths = _strings(_run_git(self.repo_root, ['ls-tree', '-r', '--name-only', '-z', 'HEAD']).stdout)
             else:

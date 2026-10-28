@@ -81,3 +81,11 @@
 `skill_runtime.py setup` 在 Skill 自己的 `.venv` 中安装依赖并检查本地官方 tokenizer，`review.py` 与裁决 CLI 从其他 Python 启动时自动以隔离模式重新进入它。保留调用者的仓库工作目录和凭据传递方式，忽略继承的 Python 搜索路径；不修改项目虚拟环境或模型配置。没有显式 `--repo`/`--packet` 时，审阅默认探索当前 Git 仓库。
 
 DeepSeek 使用官方 tokenizer 分词，并以本地模板加工具和推理字段估算请求；估算仍不等于供应商的精确 usage。auto 保留明确标注的保守估算。规划器先为整轮配置的输出额度预留空间：预计输入加完整输出和安全余量达到压缩阈值时，先压缩再调用，不把审阅输出削到只剩几千 token。真正的 `length` 终止仍保留原有续审机制。未添加模型轮数或工具次数硬上限。
+
+## 统一审阅契约与补充来源
+
+`review_contract.py` 提供直接调用和工作流共用的审阅规则及任务标题选择。输出优先级在诊断中作已知别名映射，原 finding 不变。`--execution-context` 放入现有 scope 数据，不作为可信审阅结论。
+
+显式 `--include-file` 使用 `supplement` 根提供主仓库内选定的当前磁盘文件，可补充被 Git 或输出目录规则排除的临时脚本，不改变主 repo 的 Git 读取视图，也不开放同目录其他文件。来源、首次读取快照、行号和 source ID 复用已有机制。
+
+`review_progress.py` 的 CLI 状态摘要按一分钟间隔写入 stderr，包含计数而不含源码/推理正文；库调用默认不输出。状态输出失败不会改变审阅结果，stdout 的 JSON 契约保持。

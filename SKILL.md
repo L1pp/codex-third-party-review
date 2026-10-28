@@ -15,7 +15,7 @@ description: 对代码、测试、依赖、迁移和影响运行行为的配置�
 python "<Skill根目录>/scripts/review.py" --repo "<项目目录>" --target worktree --task "<任务短标题>" --requirement "<必要需求>"
 ```
 
-可加 `--test-evidence "<已有测试结果文件>"`；脚本自动取材，模型可只读列目录、搜索和分页读取指定仓库/工作区。省略输出目录时自动保存到 Skill 的 `logs/reviews/` 并返回绝对路径；显式 `--output-dir` 必须是新目录。凭据、无关私有资料和主 GPT 结论不作为独立审阅材料，审阅工具不执行命令、修改代码或运行测试。
+可用 `--include-file "<主仓库内临时脚本>"` 补充选中的磁盘文件，保留仓库探索；跨平台/执行阶段事实可用 `--execution-context "<简短背景>"`，不放入主 GPT 审阅结论。可加 `--test-evidence "<已有测试结果文件>"`；脚本自动取材，模型可只读列目录、搜索和分页读取指定仓库/工作区。省略输出目录时自动保存到 Skill 的 `logs/reviews/` 并返回绝对路径；显式 `--output-dir` 必须是新目录。凭据、无关私有资料和主 GPT 结论不作为独立审阅材料，审阅工具不执行命令、修改代码或运行测试。
 
 4. 读取输出目录的 `report.md`、`result.json`、`report_diagnostics.json`，核实每项发现后完成正常修复与验收。用 `scripts/report_diagnostics.py --review-dir "<输出目录>" --finding finding-0001 --verdict confirmed --reason "<依据>"` 记录裁决；值可用 `confirmed`、`dismissed`、`needs_check`，多项可用 `--decisions-file "<输出目录>/adjudication-input.json"` 批量记录，裁决输入不要放入被审源码目录，确需放入时必须排除取材；报告无发现时可用 `--note` 写核查说明。来源记录可能包含搜索未命中的本地文件，不等于模型已看过全文；定位诊断不替代投递事实或缺陷判断，保留疑点和原始发现。失败、不完整报告或无发现不自动代表通过；修复后不自动再开独立复审。
 

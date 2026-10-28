@@ -32,8 +32,10 @@ def _utc():
 
 try:
     from .report_parsing import findings_from as _findings, parse_report_text
+    from .review_contract import normalize_priority
 except ImportError:
     from report_parsing import findings_from as _findings, parse_report_text
+    from review_contract import normalize_priority
 
 
 def _path(value):
@@ -60,7 +62,7 @@ def _field_diagnostics(finding):
             issues.append({"field": name, "code": "not_string"})
         elif name in ("file", "issue") and not finding[name].strip():
             issues.append({"field": name, "code": "empty"})
-    if isinstance(finding.get("priority"), str) and finding["priority"] not in {"P0", "P1", "P2", "P3"}:
+    if isinstance(finding.get("priority"), str) and normalize_priority(finding["priority"]) is None:
         issues.append({"field": "priority", "code": "unknown_priority"})
     return {"valid": not issues, "issues": issues}
 
@@ -170,6 +172,7 @@ def analyze_report(content, findings=None, sources=()):
     for index, finding in enumerate(chosen, 1):
         records.append({"id": "finding-%04d" % index, "original": copy.deepcopy(finding),
                         "fields": _field_diagnostics(finding), "location": _location(finding, source_items),
+                        "normalized_priority": normalize_priority(finding.get("priority")) if isinstance(finding, dict) else None,
                         "recovery_integrity": result["recovery_integrity"]})
     result["findings"] = records
     result["verification_scope"] = "Supplied/read text and structural checks only; diagnostic matches do not establish a real defect."

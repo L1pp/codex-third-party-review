@@ -323,3 +323,17 @@ python -m unittest discover -s scripts -p "test_*.py"
 Standard setup runs native-tokenizer checks; platform-specific tests may still be skipped. CI prepares the isolated runtime and official tokenizer assets, then runs offline tests without model calls. See [tokenizer installation (Chinese)](assets/deepseek_v4_tokenizer/README.md). Tokenizer JSON is not redistributed because its redistribution terms have not been established.
 
 Licensed under [Apache-2.0](LICENSE); external components are described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This is a directly cloneable Skill source repository, not a published plugin-store package.
+
+## Supplemental files, execution facts and progress
+
+For a temporary script excluded by Git or stored under `artifacts/`, supply the selected file while keeping repository exploration enabled:
+
+```text
+python scripts/review.py --repo "/path/to/project" --include-file "artifacts/deploy.py" --execution-context "Preparation runs on Windows; SCP transfers the file before Linux deployment; external acceptance runs separately."
+```
+
+Repeat either option as needed. Supplemental paths must identify files inside the primary repository, not whole directories. They are recorded current-disk snapshots under the `supplement` root, independent of `staged` or `range` Git views. Only those files are exposed through that root; normal credential and output-path exclusions still apply. Execution context is supplied background to verify, not a host review verdict. No packet builder is required.
+
+Direct and orchestrated reviews use the same short review contract. Diagnostics preserve each original finding and add `normalized_priority` for known `high/medium/low` or Chinese aliases; uncertain or invalid findings remain available for host adjudication.
+
+Live CLI calls print a brief status to **stderr** about once per minute, with the current call, phase and character counts, then a final completion line. **stdout remains one JSON result.** The summary contains no source or reasoning text. Use `--quiet-progress` to suppress it; local progress and full logs are retained. Ledger titles fall back to the packet task or repository title when `--task` is omitted.

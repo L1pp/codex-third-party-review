@@ -319,3 +319,17 @@ python -m unittest discover -s scripts -p "test_*.py"
 标准安装会执行原生 tokenizer 检查；仅平台专属测试按环境跳过。CI 在独立环境中准备依赖和官方资产，然后只运行离线测试，不调用模型。tokenizer 的获取与依赖见 [安装说明](assets/deepseek_v4_tokenizer/README.md)，本仓库不再分发其 JSON，尚未核明再分发条件。
 
 本项目按 [Apache-2.0](LICENSE) 发布；外部依赖见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。这是可直接克隆的 Skill 源码，并非插件商店上架包。
+
+## 补充文件、执行事实与进度
+
+临时脚本位于 `artifacts/` 或被 Git 忽略时，可以显式补充选中的文件，同时保留仓库探索：
+
+```text
+python scripts/review.py --repo "/path/to/project" --include-file "artifacts/deploy.py" --execution-context "准备在 Windows 运行；SCP 传输后在 Linux 部署；外部验收独立执行。"
+```
+
+两个参数都可重复。补充路径须是主仓库内的文件，不能是整个目录；它们作为当前磁盘快照记录在 `supplement` 根，与 staged/range 的 Git 版本分开。该根仅提供选中的文件，现有凭据和输出路径排除规则仍适用。执行背景是待核对的外部事实，不是主会话审阅结论，无需手写 packet。
+
+直接调用与工作流共享同一简短审阅契约。诊断保留原始 finding，并为 `high/medium/low`、高/中/低等已知别名提供 `normalized_priority`；疑点和格式问题不会被自动过滤。
+
+真实 CLI 调用约每分钟在 **stderr** 输出一行阶段与字符数摘要，结束时给出汇总，**stdout 仍只返回 JSON 结果**。摘要不含源码或推理原文；用 `--quiet-progress` 可关闭，不影响本地完整日志。省略 `--task` 时，台账自动采用 packet 任务或仓库标题。
