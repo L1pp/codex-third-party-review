@@ -1,14 +1,16 @@
-"""Offline tests for official catalog metadata in actual routing and budgets."""
+"""Offline catalog limits, wire parameters and official-engine handoff tests."""
 import copy
 import json
+import shutil
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import review
-import context_budget
-import workflow
+from harness_runner import build_engine_spec
+from node_runtime import node_environment
 
 EXAMPLE = review.read_json(Path(__file__).resolve().parent.parent / "config.example.json")
 NIGHT = "2026-10-26T23:00:00+08:00"
@@ -28,18 +30,22 @@ class CatalogIntegrationTests(unittest.TestCase):
     def config(self, cache):
         return dict(copy.deepcopy(EXAMPLE), _model_catalog_cache=cache)
 
-    def test_known_provider_ceilings_tighten_route_and_real_wire_budget(self):
+    def test_known_provider_ceilings_tighten_route_wire_and_preserve_attribution(self):
         config = self.config(cache_for(context=10000, output=5000))
-        config["context_management"]["headroom_tokens"] = 0
         route = review.select_route(config, NIGHT)
         self.assertEqual(route["context_window_tokens"], 10000)
+        self.assertEqual(route["max_input_tokens"], 10000)
         self.assertEqual(route["max_tokens"], 5000)
-        messages = [{"role": "user", "content": "bounded metadata integration " * 10}]
-        budget = context_budget.plan_budget(messages, [], route, config)
-        self.assertEqual(budget["context_limit"], 10000)
-        payload = review.make_payload({}, workflow._review_route_with_budget(route, budget), chat_messages=messages)
-        self.assertLessEqual(payload["max_tokens"], 5000)
-        self.assertLessEqual(budget["input_tokens"] + payload["max_tokens"] + budget["safety_tokens"], budget["context_limit"])
+        messages = [{"role": "user", "content": "Review supplied source."}]
+        payload = review.make_payload({}, route, chat_messages=messages)
+        self.assertEqual(payload["max_tokens"], 5000)
+        catalog = route["model_catalog"]
+        self.assertEqual(catalog["provider_limits"], {
+            "contextWindow": 10000, "maxInputTokens": 10000, "maxOutputTokens": 5000})
+        self.assertEqual(catalog["effective_limits"], {
+            "context_window_tokens": 10000, "max_input_tokens": 10000, "max_tokens": 5000})
+        self.assertEqual(catalog["source"]["type"], "bailian-cli-public-model-catalog")
+        self.assertEqual(catalog["source"]["cli_version"], "2.5.1")
 
     def test_catalog_never_expands_an_explicit_smaller_limit(self):
         config = self.config(cache_for())
@@ -88,41 +94,50 @@ class CatalogIntegrationTests(unittest.TestCase):
                     self.assertEqual(route["max_tokens"], 256000)
                     self.assertNotIn("model_catalog", route)
 
-    def test_length_recovery_compaction_obeys_provider_and_smaller_user_caps(self):
+    def test_official_runtime_compaction_wire_obeys_provider_and_smaller_user_caps(self):
+        # Pressure and continuation transactions are tested in runtime/test_context.mjs.
+        # This crosses the catalog -> selected route -> actual Node wire boundary.
+        root = Path(__file__).resolve().parent.parent
+        node = shutil.which("node")
+        if not node or not (root / "runtime/node_modules/@deepseek-ai/dsh-llm/package.json").is_file():
+            self.skipTest("Node runtime dependencies are not installed; run Skill setup")
+        program = """import {readFileSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
+const {buildPayload}=await import(pathToFileURL(process.argv[1]).href);
+const route=JSON.parse(readFileSync(0,'utf8'));
+const options={provider:'review',model:route.model,purpose:'compaction',maxTokens:16384,
+  reasoningEffort:'none',messages:[{role:'user',content:[{type:'text',text:'Review supplied source.'}]}]};
+console.log(JSON.stringify(buildPayload(options,route)));
+"""
         for user_cap, expected in [(393216, 5000), (1024, 1024)]:
-            with self.subTest(user_cap=user_cap), tempfile.TemporaryDirectory() as folder:
+            with self.subTest(user_cap=user_cap):
                 config = self.config(cache_for(output=5000))
                 config["night"]["max_tokens"] = user_cap
-                calls = []
-                def fake_call(config, packet, output_dir, **kwargs):
-                    route = kwargs["route_override"]
-                    wire = review.make_payload({}, route, chat_messages=kwargs["chat_messages"])
-                    calls.append((wire, kwargs["token_budget"]))
-                    if len(calls) == 1:
-                        return {"status": "incomplete", "finish_reason": "length",
-                                "content": "partial report", "parse_ok": False}
-                    return {"status": "completed", "finish_reason": "stop",
-                            "content": "checkpoint" if len(calls) == 2 else '{"findings":[]}',
-                            "parse_ok": len(calls) == 3, "parsed_findings": []}
-                result = workflow.run_workflow(
-                    config, {"task": "review sample", "files": [{"path": "x.py", "content": "value = 1"}]},
-                    Path(folder)/"review", review_call=fake_call,
-                    route_selector=lambda cfg, at=None: review.select_route(cfg, NIGHT))
-                self.assertEqual(result["status"], "completed")
-                self.assertEqual(len(calls), 3)
-                compact_wire, compact_budget = calls[1]
-                self.assertEqual(compact_wire["max_tokens"], expected)
-                self.assertEqual(compact_budget["requested_output_tokens"], expected)
-                self.assertEqual(compact_budget["effective_output_tokens"], expected)
-                self.assertFalse(compact_wire["enable_thinking"])
+                route = review.select_route(config, NIGHT)
+                result = subprocess.run(
+                    [node, "--input-type=module", "-e", program, str(root / "runtime/adapter.mjs")],
+                    input=json.dumps(route), capture_output=True, text=True, encoding="utf-8",
+                    env=node_environment(), cwd=root, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                wire = json.loads(result.stdout)
+                self.assertEqual(wire["max_tokens"], expected)
+                self.assertFalse(wire["enable_thinking"])
+                self.assertEqual(wire["reasoning_effort"], "none")
 
-    def test_an_external_route_cannot_raise_configured_context_budget(self):
-        config = copy.deepcopy(EXAMPLE)
+    def test_configured_context_and_catalog_provenance_reach_official_engine_spec(self):
+        config = self.config(cache_for())
         config["context_window_tokens"] = 10000
+        config["night"]["max_tokens"] = 1024
         route = review.select_route(config, NIGHT)
-        route["context_window_tokens"] = 1000000
-        budget = context_budget.plan_budget([{"role": "user", "content": "small"}], [], route, config)
-        self.assertEqual(budget["context_limit"], 10000)
+        with tempfile.TemporaryDirectory() as folder:
+            spec = build_engine_spec(config, Path(folder), route,
+                                     [{"role": "user", "content": "Review supplied source."}], [])
+        self.assertEqual(spec["route"]["context_window_tokens"], 10000)
+        self.assertEqual(spec["route"]["max_tokens"], 1024)
+        self.assertEqual(spec["route"]["model_catalog"]["provider_limits"]["contextWindow"], 1000000)
+        self.assertEqual(spec["route"]["model_catalog"]["effective_limits"]["context_window_tokens"], 10000)
+        self.assertEqual(spec["route"]["model_catalog"]["source"]["cli_version"], "2.5.1")
 
 
 if __name__ == "__main__":

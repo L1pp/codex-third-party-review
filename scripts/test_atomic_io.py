@@ -124,7 +124,7 @@ class AtomicIOTests(unittest.TestCase):
 
     def test_four_runtime_json_writers_share_recovery_and_keep_their_formats(self):
         import review
-        import workflow
+        import harness_records as workflow
         import repository_source
         import report_diagnostics
         actual = atomic_io.os.replace

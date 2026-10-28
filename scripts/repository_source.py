@@ -23,12 +23,12 @@ MAX_INITIAL_BYTES = 64 * 1024 * 1024
 MAX_SEARCH_BYTES = 8 * 1024 * 1024
 MAX_SEARCH_FILES = 100
 _SKIP_DIRS = {'.git', '.hg', '.svn', 'node_modules', '.venv', 'venv', '__pycache__',
-              '.pytest_cache', '.mypy_cache', 'dist', 'build', '.next', '.cache'}
+              '.pytest_cache', '.mypy_cache', 'dist', 'build', '.next', '.cache', 'engine-session'}
 _PRIVATE_NAMES = {'credentials.json', 'auth.json', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519',
                   '.netrc', '.npmrc', '.pypirc', 'api-key.txt', 'api_key.txt', 'deepseek-api-key.txt',
                   'secrets.json', 'secrets.yaml', 'secrets.yml', 'credentials.yaml', 'credentials.yml',
                   '.git-credentials', '.htpasswd', 'report_diagnostics.json', 'adjudication.json', 'resume-state.json',
-                  'private-decisions.json', 'local_io_errors.jsonl'}
+                  'private-decisions.json', 'local_io_errors.jsonl', 'session-header.json', 'session.jsonl', 'writer.lock'}
 _PRIVATE_SUFFIXES = {'.pem', '.key', '.p12', '.pfx', '.keystore'}
 _PRIVATE_ROOT_DIRS = {'logs', 'artifacts', 'outputs', 'reviews', '.review', '.third-party-review'}
 # Exact known sidecars only. Ordinary project JSON and .tmp files stay readable.

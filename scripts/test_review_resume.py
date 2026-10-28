@@ -71,6 +71,211 @@ class ReviewResumeTests(unittest.TestCase):
     def restore(self, **kwargs):
         return self.state().source_factory({}, **kwargs)(self.new)
 
+    def node_session(self):
+        engine = self.old / "engine-session"
+        engine.mkdir()
+        self.save(engine / "session-header.json", {
+            "format": "third-party-review-dsh-session", "formatVersion": 1,
+            "header": {"id": "offline-session", "isSeeded": False},
+            "inheritedEventCount": 0,
+        })
+        (engine / "session.jsonl").write_text("", encoding="utf-8")
+        return engine
+
+    def compaction_only(self, status="error", *, node=True, stage="compaction"):
+        if node:
+            self.node_session()
+        destination = self.call.parent / ("0001-" + stage)
+        self.call.rename(destination)
+        self.call = destination
+        self.flow.update(status=status, route=dict(self.route))
+        self.flow["child_calls"] = [{"stage": stage, "directory": str(self.call), "status": "error"}]
+        self.save(self.old / "workflow.json", self.flow)
+        summary_route = dict(self.route, reasoning_effort="none", enable_thinking=False, max_tokens=16384)
+        self.save(self.call / "request.json", {
+            "url": self.endpoint, "route": summary_route,
+            "payload": {"messages": [{"role": "user", "content": "Checkpoint task material"},
+                                      {"role": "assistant", "content": "SUMMARY_ONLY_SENTINEL"}]},
+        })
+        self.save(self.call / "result.json", {
+            "status": "error", "content": "SUMMARY_ONLY_SENTINEL", "reasoning_text": "SUMMARY_REASONING_SENTINEL",
+            "reasoning_chars": 26, "usage": {}, "parse_ok": True,
+            "parsed_findings": [{"title": "Not a review finding"}],
+        })
+
+    def test_node_running_with_only_initial_compaction_preserves_full_route(self):
+        self.compaction_only("running")
+        state = self.state()
+        self.assertEqual(state.route, self.route)
+        self.assertEqual(state.route["reasoning_effort"], "max")
+        self.assertEqual(state.route["max_tokens"], 256000)
+        self.assertEqual(state.endpoint, self.endpoint)
+        self.assertTrue(state.crash_recovery_candidate)
+        self.assertEqual(state.latest_call_dir, self.call)
+        self.assertFalse(state.provenance["review_progress_available"])
+        self.assertEqual(state.provenance["source_call_stage"], "compaction")
+
+    def test_node_requesting_initial_compaction_without_result_is_resumable(self):
+        self.compaction_only("requesting")
+        (self.call / "result.json").unlink()
+        state = self.state()
+        self.assertTrue(state.crash_recovery_candidate)
+        self.assertEqual(state.latest_result["status"], "interrupted")
+        self.assertEqual(state.latest_result["error_type"], "ProcessInterrupted")
+        self.assertTrue(state.latest_result["usage_missing"])
+        self.assertEqual(state.route, self.route)
+        self.assertEqual(state.latest_result["content"], "")
+        self.assertEqual(state.latest_result["reasoning_text"], "")
+
+    def test_node_ended_compaction_error_does_not_become_review_findings(self):
+        self.compaction_only("error")
+        originals = {p.relative_to(self.old).as_posix(): p.read_bytes() for p in self.old.rglob("*") if p.is_file()}
+        state = self.state()
+        self.assertFalse(state.crash_recovery_candidate)
+        self.assertEqual(state.review_messages, [])
+        self.assertEqual(state.latest_result["content"], "")
+        self.assertEqual(state.latest_result["reasoning_text"], "")
+        self.assertFalse(state.latest_result["parse_ok"])
+        self.assertIsNone(state.latest_result["parsed_findings"])
+        self.assertEqual(state.latest_result["source_stage"], "compaction")
+        self.assertEqual(state.inline_delivered_ranges, [])
+        self.assertEqual({p.relative_to(self.old).as_posix(): p.read_bytes() for p in self.old.rglob("*") if p.is_file()}, originals)
+
+    def test_legacy_python_compaction_only_still_requires_a_review_record(self):
+        self.compaction_only("error", node=False)
+        with self.assertRaises(ResumeError): self.state()
+
+    def test_node_compaction_only_never_falls_back_to_summary_route(self):
+        self.compaction_only("error")
+        self.flow.pop("route")
+        self.save(self.old / "workflow.json", self.flow)
+        with self.assertRaises(ResumeError): self.state()
+
+    def test_node_compaction_part_directory_is_accepted_inside_calls(self):
+        self.compaction_only("running", stage="compaction-part-1-2")
+        state = self.state()
+        self.assertEqual(state.latest_call_dir, self.call)
+        self.assertEqual(state.route, self.route)
+        self.assertEqual(state.provenance["source_call_stage"], "compaction-part-1-2")
+
+    def test_node_review_uses_workflow_full_route_when_recorded(self):
+        self.node_session()
+        self.flow["route"] = dict(self.route, max_tokens=256000)
+        self.save(self.old / "workflow.json", self.flow)
+        request = json.loads((self.call / "request.json").read_text(encoding="utf-8"))
+        request["route"] = dict(self.route, max_tokens=16384, reasoning_effort="none")
+        self.save(self.call / "request.json", request)
+        self.assertEqual(self.state().route, self.flow["route"])
+
+    def test_node_crash_missing_result_preserves_reasoning_and_unknown_usage(self):
+        engine = self.node_session()
+        self.flow["status"] = "running"
+        self.flow["child_calls"][0]["status"] = "requesting"
+        scope = {"path": "repo/app.py", "start_line": 1, "end_line": 2}
+        self.flow["child_calls"][0]["inline_material_ranges"] = [scope]
+        self.save(self.old / "workflow.json", self.flow)
+        (self.call / "result.json").unlink()
+        reasoning = "Potential issue\r\nStill verifying evidence."
+        (self.call / "reasoning.txt").write_bytes(reasoning.encode("utf-8"))
+        # A partial response log is retained, never interpreted as a tool call.
+        (self.call / "response_stream.jsonl").write_text('data: {"tool_calls":[{"arguments":"{"}]', encoding="utf-8")
+        originals = {p.relative_to(self.old).as_posix(): p.read_bytes() for p in self.old.rglob("*") if p.is_file()}
+        state = self.state()
+        self.assertTrue(state.crash_recovery_candidate)
+        self.assertTrue(state.provenance["crash_recovery_candidate"])
+        self.assertEqual(state.latest_result["status"], "interrupted")
+        self.assertEqual(state.latest_result["error_type"], "ProcessInterrupted")
+        self.assertEqual(state.latest_result["reasoning_text"], reasoning)
+        self.assertEqual(state.latest_result["reasoning_chars"], len(reasoning))
+        self.assertEqual(state.latest_result["usage"], {})
+        self.assertTrue(state.latest_result["usage_missing"])
+        self.assertFalse(state.latest_result["parse_ok"])
+        self.assertIsNone(state.latest_result["parsed_findings"])
+        self.assertEqual(state.latest_result["tool_calls"], [])
+        self.assertEqual(state.inline_delivered_ranges, [scope])
+        self.assertEqual(state.route, self.route)
+        self.assertEqual(state.endpoint, self.endpoint)
+        restored = state.source_factory({})(self.new)
+        self.assertTrue(restored.repository_manifest()["resume"]["crash_recovery_candidate"])
+        self.assertTrue(json.loads((self.new / "resume-state.json").read_text(encoding="utf-8"))["crash_recovery_candidate"])
+        self.assertEqual({p.relative_to(self.old).as_posix(): p.read_bytes() for p in self.old.rglob("*") if p.is_file()}, originals)
+        self.assertTrue((engine / "session.jsonl").is_file())
+
+    def test_node_unclosed_states_are_only_readonly_recovery_candidates(self):
+        engine = self.node_session()
+        lock = {"pid": 1, "writer": "possibly-active-offline-fixture"}
+        self.save(engine / "writer.lock", lock)
+        for status in ("running", "preparing", "requesting"):
+            with self.subTest(status=status):
+                self.flow["status"] = status
+                self.save(self.old / "workflow.json", self.flow)
+                state = self.state()
+                self.assertTrue(state.crash_recovery_candidate)
+                self.assertEqual(state.provenance["source_review_status"], status)
+                self.assertEqual(json.loads((engine / "writer.lock").read_text(encoding="utf-8")), lock)
+
+    def test_legacy_python_active_states_and_missing_result_remain_rejected(self):
+        for status in ("running", "preparing", "requesting"):
+            with self.subTest(status=status):
+                self.flow["status"] = status
+                self.save(self.old / "workflow.json", self.flow)
+                with self.assertRaises(ResumeError): self.state()
+        self.flow["status"] = "error"
+        self.save(self.old / "workflow.json", self.flow)
+        (self.call / "result.json").unlink()
+        with self.assertRaises(ResumeError): self.state()
+
+    def test_node_session_pair_is_required_for_unclosed_status(self):
+        engine = self.node_session()
+        (engine / "session.jsonl").unlink()
+        self.flow["status"] = "running"
+        self.save(self.old / "workflow.json", self.flow)
+        with self.assertRaises(ResumeError): self.state()
+
+    def test_node_session_schema_is_deferred_to_backend(self):
+        engine = self.node_session()
+        (engine / "session-header.json").write_text("not-json: backend must reject schema", encoding="utf-8")
+        self.flow["status"] = "requesting"
+        self.save(self.old / "workflow.json", self.flow)
+        self.assertTrue(self.state().crash_recovery_candidate)
+
+    def test_node_crash_without_reasoning_stays_incomplete_not_zero_findings(self):
+        self.node_session()
+        self.flow["status"] = "preparing"
+        self.save(self.old / "workflow.json", self.flow)
+        (self.call / "result.json").unlink()
+        (self.call / "reasoning.txt").unlink()
+        state = self.state()
+        self.assertEqual(state.latest_result["status"], "interrupted")
+        self.assertEqual(state.latest_result["reasoning_chars"], 0)
+        self.assertIsNone(state.latest_result["parsed_findings"])
+        self.assertTrue(state.latest_result["usage_missing"])
+
+    def test_node_session_event_symlink_escape_is_rejected(self):
+        engine = self.node_session()
+        events = engine / "session.jsonl"
+        events.unlink()
+        outside = self.home / "outside-events.jsonl"
+        outside.write_text("outside", encoding="utf-8")
+        try: events.symlink_to(outside)
+        except (OSError, NotImplementedError): self.skipTest("Symlink creation unavailable")
+        self.flow["status"] = "running"
+        self.save(self.old / "workflow.json", self.flow)
+        with self.assertRaises(ResumeError): self.state()
+
+    def test_node_crash_still_requires_request_route_and_endpoint(self):
+        self.node_session()
+        self.flow["status"] = "running"
+        self.save(self.old / "workflow.json", self.flow)
+        (self.call / "result.json").unlink()
+        request = json.loads((self.call / "request.json").read_text(encoding="utf-8"))
+        for field in ("route", "url"):
+            with self.subTest(missing=field):
+                malformed = dict(request)
+                malformed.pop(field)
+                self.save(self.call / "request.json", malformed)
+                with self.assertRaises(ResumeError): self.state()
+
     def test_old_capture_identity_view_text_and_scope_survive_disk_changes(self):
         old_bytes = (self.old / "sources" / "source-0002.txt").read_bytes()
         self.write("helper.py", "value = 999\n")
@@ -270,6 +475,7 @@ class ReviewResumeTests(unittest.TestCase):
             "stage": "review", "directory": str(self.old / "calls" / "0000-review"),
             "status": "tool_calls", "inline_material_ranges": [completed],
         })
+        (self.old / "calls" / "0000-review").mkdir()
         self.flow["coverage"]["inline_delivered_ranges"] = [completed, phantom]
         self.save(self.old / "workflow.json", self.flow)
         self.assertEqual(self.state().inline_delivered_ranges, [completed])

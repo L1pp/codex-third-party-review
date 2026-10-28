@@ -66,3 +66,11 @@ local_io_errors.jsonl
 
 # Cross-process review provenance (local only)
 resume-state.json
+
+# Isolated official Harness runtime dependencies and local session storage
+node_modules/
+runtime/package-lock.json
+engine-session/
+session-header.json
+session.jsonl
+writer.lock

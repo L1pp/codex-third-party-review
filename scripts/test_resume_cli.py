@@ -8,11 +8,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import history_cleanup
 import repository_source
 import review
 import review_resume
-import workflow
+import harness_runner
 
 
 ROUTE = {
@@ -70,17 +69,13 @@ class ResumeCLITests(unittest.TestCase):
         self.original = {str(p.relative_to(self.old)): p.read_bytes() for p in self.old.rglob("*") if p.is_file()}
         for target, attribute, replacement in (
             (review, "DEFAULT_OUTPUT_ROOT", self.default_output),
-            (workflow, "plan_budget", budget),
         ):
             handle = patch.object(target, attribute, replacement)
             handle.start()
             self.addCleanup(handle.stop)
         # These are strict side-effect guards, not substituted model responses.
-        handle = patch.object(review.requests, "Session", side_effect=AssertionError("Network/model calls are forbidden in offline CLI tests"))
+        handle = patch.object(harness_runner, "_run_bridge", side_effect=AssertionError("Runtime/model calls are forbidden in offline CLI tests"))
         self.session = handle.start()
-        self.addCleanup(handle.stop)
-        handle = patch.object(history_cleanup, "estimate_tokens", return_value={"input_tokens": 10})
-        handle.start()
         self.addCleanup(handle.stop)
 
     @staticmethod
@@ -106,7 +101,7 @@ class ResumeCLITests(unittest.TestCase):
                 patch.object(state, "source_factory", wraps=real_factory) as factory, \
                 patch.object(repository_source, "RepositorySource", side_effect=AssertionError("Resume must not collect cwd as a new repository")), \
                 patch.object(review, "load_credential", side_effect=AssertionError("Dry run must not read credentials")), \
-                patch.object(workflow, "run_workflow", return_value={"status": "dry_run", "route": ROUTE}) as run:
+                patch.object(harness_runner, "run_harness_workflow", return_value={"status": "dry_run", "route": ROUTE}) as run:
             code, summary = self.main("--resume", self.old, "--output-dir", self.output, "--dry-run")
         self.assertEqual(code, 0)
         loader.assert_called_once_with(self.old)
@@ -180,40 +175,27 @@ class ResumeCLITests(unittest.TestCase):
         request["url"] = "https://other.example.invalid/v1/chat/completions"
         self.save(self.call / "request.json", request)
         with patch.object(review, "load_credential", return_value=FAKE_KEY), \
-                patch.object(workflow, "run_workflow", side_effect=AssertionError("Mismatched endpoint must stop before execution")):
+                patch.object(harness_runner, "run_harness_workflow", side_effect=AssertionError("Mismatched endpoint must stop before execution")):
             code, summary = self.main("--resume", self.old, "--output-dir", self.output)
         self.assertEqual(code, 2)
         self.assertIn("endpoint differs", summary["error"])
         self.assertFalse(self.output.exists())
 
-    def test_live_resume_keeps_old_route_and_passes_only_actual_attempts_to_runner(self):
-        calls = []
-        def local_call(config, packet, directory, **kwargs):
-            calls.append(copy.deepcopy(kwargs))
-            directory = Path(directory)
-            directory.mkdir(parents=True, exist_ok=False)
-            is_checkpoint = kwargs["route_override"].get("reasoning_effort") == "none"
-            result = {
-                "status": "completed", "finish_reason": "stop", "stream_done": True,
-                "content": "Checked caller; verify uncertain calc boundary" if is_checkpoint else '{"findings":[],"context_gaps":[]}',
-                "parse_ok": not is_checkpoint, "parsed_report": None if is_checkpoint else {"findings": [], "context_gaps": []},
-                "parsed_findings": None if is_checkpoint else [], "seconds": 0.25,
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-            }
-            self.save(directory / "result.json", result)
-            return result
-        with patch.object(review, "load_credential", return_value=FAKE_KEY) as credential, \
-                patch.object(review, "select_route", side_effect=AssertionError("Current time must not re-route old DeepSeek review to auto")), \
-                patch.object(review, "run_review", side_effect=local_call):
-            code, summary = self.main("--resume", self.old, "--output-dir", self.output)
-        self.assertEqual(code, 0, summary)
-        credential.assert_called_once()
-        self.assertEqual(len(calls), 2)
-        self.assertTrue(all(call["route_override"]["model"] == ROUTE["model"] for call in calls))
-        self.assertEqual(calls[-1]["route_override"], ROUTE)
-        self.assertEqual(summary["model_calls"], 2)
-        self.assertEqual(summary["status"], "completed")
-        self.assertEqual(len(list((self.output / "calls").iterdir())), 2)
+    def test_live_resume_keeps_old_route_and_passes_legacy_progress_to_official_host(self):
+        from unittest.mock import Mock
+        captured={}
+        def bridge(spec, secret, records, store, config, **kwargs):
+            captured.update(spec)
+            records.request_start({"id":"final","payload":{"model":spec["route"]["model"],"messages":[]},"route":spec["route"]})
+            records.request_end({"id":"final","status":"completed","finish_reason":"stop","content":'{"findings":[],"context_gaps":[]}',"usage":{"prompt_tokens":1,"completion_tokens":1},"seconds":0.1})
+            return {"status":"completed","sessionId":spec["sessionId"],"finalContent":'{"findings":[],"context_gaps":[]}',"finishReason":"completed"}
+        ready={"executable":"unused-offline"}
+        with patch.object(review,"load_credential",return_value=FAKE_KEY),patch.object(review,"select_route",side_effect=AssertionError("No re-route")),patch.object(harness_runner,"_ensure_runtime",return_value=ready),patch.object(harness_runner,"_run_bridge",side_effect=bridge):
+            code, summary=self.main("--resume",self.old,"--output-dir",self.output)
+        self.assertEqual(code,0,summary)
+        self.assertEqual(captured["route"],ROUTE)
+        self.assertIn("legacyProgress",captured)
+        self.assertEqual(summary["model_calls"],1)
         self.assert_original_unchanged()
 
     def test_resume_packet_and_repo_are_mutually_exclusive_before_side_effects(self):

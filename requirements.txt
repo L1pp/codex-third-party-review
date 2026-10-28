@@ -1,4 +1,4 @@
-# Runtime and offline tests; no model SDK is required.
+# Python host and offline helpers; the live model SDK/runtime is installed from runtime/package.json.
 requests>=2.32.5,<3
 # Supplies IANA time zones on Windows and minimal Python installations.
 tzdata>=2025.2
@@ -6,5 +6,5 @@ tzdata>=2025.2
 # Local recovery of malformed model JSON; does not call a model.
 json-repair==0.64.2
 
-# Retry strategies for local atomic replacement and workflow-managed temporary API failures.
+# Local atomic-file replacement retries; live API retry execution belongs to the official Node Harness runtime.
 tenacity==9.2.1

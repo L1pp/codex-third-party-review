@@ -33,10 +33,23 @@ def using_skill_runtime(root=SKILL_ROOT):
     return Path(sys.prefix).resolve() == (Path(root) / ".venv").resolve()
 
 
+def _node_info(root):
+    # Legacy/offline copied entrypoints can still report Python readiness before
+    # the new Node helper has been installed; no dependency repair occurs here.
+    try:
+        try:
+            from .node_runtime import node_runtime_info
+        except ImportError:
+            from node_runtime import node_runtime_info
+        return node_runtime_info(root)
+    except ImportError:
+        return {"available": False, "ready": False, "error": "Node runtime helper is not installed"}
+
+
 def runtime_info(root=SKILL_ROOT):
     return {"python": sys.executable, "python_version": sys.version.split()[0],
             "skill_python": str(runtime_python(root)), "isolated": bool(sys.flags.isolated),
-            "using_skill_runtime": using_skill_runtime(root)}
+            "using_skill_runtime": using_skill_runtime(root), "node": _node_info(root)}
 
 
 def dependency_versions():
@@ -70,7 +83,7 @@ def ensure_runtime_dependencies(root=SKILL_ROOT, *, allow_install=False):
         return dependency_versions()
 
 
-def check_runtime(root=SKILL_ROOT):
+def check_runtime(root=SKILL_ROOT, *, require_node=False):
     """Check installed libraries and local native assets, without a model/network."""
     root = Path(root).resolve()
     code = ("import sys,json;from pathlib import Path;"
@@ -90,6 +103,14 @@ def check_runtime(root=SKILL_ROOT):
     for name, expected in PINNED_DEPENDENCIES.items():
         if record["dependencies"].get(name) != expected:
             raise RuntimeError("Skill runtime needs " + name + "==" + expected + "; rerun setup")
+    if require_node:
+        try:
+            from .node_runtime import check_node_runtime
+        except ImportError:
+            from node_runtime import check_node_runtime
+        record["node"] = check_node_runtime(root)
+    else:
+        record["node"] = _node_info(root)
     return record
 
 
@@ -114,7 +135,12 @@ def setup_runtime(root=SKILL_ROOT, *, source_dir=None, source_zip=None, download
             raise RuntimeError("Tokenizer assets are missing; supply --source-dir, --source-zip or --download-official")
         # Existing complete installations are never overwritten by setup.
         install_assets(content, destination=assets, force=False)
-    record = check_runtime(root)
+    try:
+        from .node_runtime import setup_node_runtime
+    except ImportError:
+        from node_runtime import setup_node_runtime
+    setup_node_runtime(root)
+    record = check_runtime(root, require_node=True)
     (destination / "skill-runtime.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
     return record
 
@@ -175,7 +201,7 @@ def main(argv=None):
             return subprocess.call([str(runtime_python()), "-I", "-m", "unittest", "discover", "-s", str(SKILL_ROOT / "scripts"), "-p", "test_*.py", "-v"], env=clean_environment(), cwd=SKILL_ROOT)
         result = (setup_runtime(source_dir=args.source_dir, source_zip=args.source_zip,
                                 download_official=args.download_official)
-                  if args.action == "setup" else check_runtime())
+                  if args.action == "setup" else check_runtime(require_node=True))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         print("Runtime setup/check failed. Existing config, credentials and review records were not modified.", file=sys.stderr)
         return 1

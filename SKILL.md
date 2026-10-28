@@ -7,7 +7,7 @@ description: 对代码、测试、依赖、迁移和影响运行行为的配置�
 
 保留正常 GPT 开发、审阅和验收流程；同一主任务由主会话额外运行一次，开发子 Agent 不重复调用。用户明确指定或禁止时遵从用户要求。
 
-1. 以本 `SKILL.md` 实际所在目录定位 `scripts/review.py` 和本地 `config.json`；入口自动使用本 Skill 的独立 `.venv`，安装与配置见 [README.md](README.md)。不要猜测安装位置。
+1. 以本 `SKILL.md` 实际所在目录定位 `scripts/review.py` 和本地 `config.json`；入口自动使用本 Skill 的独立 `.venv` 与 `runtime/` 中的官方 Harness 依赖，安装与配置见 [README.md](README.md)。不要猜测安装位置。
 2. 给出任务仓库、审阅目标、简短需求和已有测试证据，无需逐文件复制源码或准备 packet。省略 `--repo` 时自动使用当前仓库，默认 `worktree`；仅暂存改动用 `staged`，分支范围用 `range --base <本地ref>`。涉及额外工作区时通过 `--workspace-root` 指定，允许根重叠；`repo` 按目标 Git 视图读取，工作区别名始终读磁盘，核查时区分路径和来源版本。
 3. 遵守宿主项目和平台的命令权限执行入口，入口负责切换独立 Python：
 

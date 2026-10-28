@@ -10,7 +10,7 @@ This Skill does not change Codex's main model configuration. A completed report 
 
 ## 1. Install the Skill
 
-You need **Git, Python 3.10+, Codex with permission to run local scripts, and an API key for the external model service**. Your ChatGPT/Codex subscription sign-in does not supply that external API key. The Bailian CLI is optional. The dedicated runtime includes the native DeepSeek tokenizer dependencies; setup installs the two official JSON assets locally.
+You need **Git, Python 3.10+, Node.js 24.9.0+ with npm, Codex with permission to run local scripts, and an API key for the external model service**. Your ChatGPT/Codex subscription sign-in does not supply that external API key. The Bailian CLI is optional. Setup prepares this Skill's Python host, official Harness Node dependencies, and the two official tokenizer JSON assets locally. Install a suitable Node.js version first; setup reports a missing/old Node and does not change system Node for you.
 
 Choose the instructions for your platform. These commands are for a **new installation**: the destination must not already exist. If a step fails, resolve the error before continuing. For an existing installation, see the update instructions at the end.
 
@@ -27,6 +27,8 @@ After cloning successfully:
 ```powershell
 Set-Location $skillDir
 python --version
+node --version
+npm --version
 python scripts/skill_runtime.py setup --download-official
 Copy-Item config.example.json config.json
 ```
@@ -43,11 +45,13 @@ After cloning successfully:
 ```bash
 cd "$HOME/.agents/skills/third-party-code-review"
 python3 --version
+node --version
+npm --version
 python3 scripts/skill_runtime.py setup --download-official
 cp config.example.json config.json
 ```
 
-The rest of this guide uses `python`; substitute `python3` where appropriate. Setup creates this Skill's own `.venv`, installs its runtime dependencies (including `json-repair`, `tokenizers`, and Jinja2), and checks the local official tokenizer. It does not call a model or read API credentials. Existing configuration, review logs, and complete tokenizer assets remain in place.
+The rest of this guide uses `python`; substitute `python3` where appropriate. Setup creates the Skill's `.venv`, installs Python host dependencies, checks the local official tokenizer, and installs the exact packages in `runtime/package.json` under `runtime/node_modules`. npm lifecycle scripts, audit, and funding operations are disabled. Setup does not call a model, read API credentials, overwrite personal configuration, or modify individual project environments.
 
 If you already downloaded the official assets, setup can use them without downloading the archive again:
 
@@ -55,7 +59,7 @@ If you already downloaded the official assets, setup can use them without downlo
 python scripts/skill_runtime.py setup --source-dir "<local tokenizer directory>"
 ```
 
-The `review.py` and adjudication CLI automatically re-enter the Skill's isolated Python, even when Codex starts them with a project's Python. They retain the project's working directory and use the Skill's dependencies. No activation or dependency installation in individual projects is needed. The bootstrap ignores inherited Python import paths and user-site packages; this is interpreter isolation, not an operating-system sandbox.
+The `review.py` and adjudication CLI automatically re-enter the Skill's isolated Python, even when Codex starts them with a project's Python. Live reviews then use the Skill-local Node bridge: the official Harness AgentLoop owns requests, read-only tool continuations, retry, session history, and compaction. Python supplies source material and records the result. No activation or dependency installation in individual projects is needed. Offline queries and dry runs do not automatically install missing packages. This is interpreter/dependency isolation, not an operating-system sandbox.
 
 Check the active runtime without loading credentials or calling a model:
 
@@ -63,7 +67,7 @@ Check the active runtime without loading credentials or calling a model:
 python scripts/review.py --runtime-info
 ```
 
-The user-level directory `~/.agents/skills/third-party-code-review/` makes the Skill available across projects. For one project only, place the complete repository at that project's `.agents/skills/third-party-code-review/`. Keep the relative layout of `SKILL.md`, `scripts/`, configuration examples, and supporting files; copying only `SKILL.md` is insufficient. See the [official OpenAI Skill documentation](https://learn.chatgpt.com/docs/build-skills). If the Skill does not appear, reopen Codex.
+The user-level directory `~/.agents/skills/third-party-code-review/` makes the Skill available across projects. For one project only, place the complete repository at that project's `.agents/skills/third-party-code-review/`. Keep the relative layout of `SKILL.md`, `scripts/`, `runtime/` (including its package manifest and attributed vendor files), configuration examples, and supporting files; copying only `SKILL.md` or `scripts/` is insufficient. See the [official OpenAI Skill documentation](https://learn.chatgpt.com/docs/build-skills). If the Skill does not appear, reopen Codex.
 
 ## 2. Configure the API key
 
@@ -143,7 +147,7 @@ The default configuration uses **Asia/Shanghai (Beijing time)**, independently o
 
 The route is selected once at the start of a workflow. Material reads or checkpoint continuations do not switch models if the time crosses a boundary. Checkpoint compaction uses a separate, smaller output budget without switching the selected model. The provider selects the underlying model for `auto`; this project cannot identify it from that name. These limits describe configuration and service-adapter assumptions, not a live capability guarantee for every account or model.
 
-Defaults: a 1,000,000-token context window and approximately 100,000 locally estimated material tokens sent inline. DeepSeek uses the published DSH output default of 256,000 tokens with max reasoning effort. Before each request, the runtime reserves the full configured output and 65,536 tokens of headroom; it checks pressure at the smaller of 80% of the window and the remaining input budget (678,464 input tokens for the default DeepSeek route). Under pressure it first trims old, re-readable tool results locally, then summarizes older progress if needed while retaining a balanced recent tail. It does not interrupt an active stream to compact. Repository exploration remains available even when all initial materials fit inline; the model can look for callers, contracts, configuration, and relevant tests without the main session copying each file. Local estimates are not the provider's `usage`. The dedicated CLI checks native DeepSeek tokenizer readiness before any request. See [architecture and boundaries (Chinese)](docs/architecture.md).
+Defaults remain a **1,000,000-token context window**, approximately **100,000 locally estimated material tokens inline**, and DeepSeek **max** effort with **256,000 output tokens**. The live runtime uses one native-tokenizer meter beneath official Harness compaction/pruning services. It reserves the complete output plus 65,536 headroom and checks pressure at the smaller of 80% of the window or the remaining input room (678,464 input tokens for the default DeepSeek route). It prunes older tool text before summarizing balanced history and commits only a complete, smaller checkpoint. Initial Python estimates select the material prefix; they are not a second live pressure engine. No active stream is interrupted to compact. Repository exploration remains available even when the initial bundle fits. Local estimates are not provider `usage`; see [architecture](docs/architecture.md) and [the upstream reuse map](docs/harness-reuse.md).
 
 **To use one model all day:** replace the complete `day` and `night` route objects, rather than changing only the model name and retaining another model's reasoning/output parameters. For example, replace both route objects with the following to use DeepSeek throughout the day; retain every other top-level configuration field:
 
@@ -173,7 +177,8 @@ Other useful settings:
 | `base_url` | HTTPS base URL; the script appends `/chat/completions`. Do not include that suffix twice. |
 | `model_catalog_file` | Optional public-catalog cache; relative to the configuration file's directory. Missing cache is allowed; reviews never refresh it implicitly. |
 | `ledger_file` | Optional SQLite ledger path; relative paths use the command's working directory. Prefer an absolute path. Defaults to the Skill's `logs/` directory. |
-| `automatic_retries` | Keep `0`; each low-level call is one recorded attempt. Recovery is managed by the workflow below. |
+| `node_executable` | Optional Node executable path/name; otherwise use `node` on PATH. Requires version 24.9.0 or newer. |
+| `automatic_retries` | Keep `0`; a direct low-level call stays one attempt. The official Harness retry service owns live workflow recovery. |
 | `api_recovery.retry_window_seconds` | Defaults to `120`; elapsed window for starting retries of a temporary failure before usable output. `0` disables those retries. |
 | `context_management.max_model_calls` / `max_compactions` | `null` by default, with no fixed count limit. Positive integers limit counts. Legacy `0` also means unlimited, not disabled. |
 
@@ -260,6 +265,7 @@ The terminal prints the absolute output directory. It contains:
 | `sources/index.json`, `sources/source-0001.txt`, ... | Numbered local source records, including files scanned by a search that returned no match |
 | `report_diagnostics.json` | Derived field, location, and evidence checks, plus the recovered report candidate and repair log; the original report is preserved |
 | `adjudication.json` | Main-session decisions, initially pending; not an automatic approval |
+| `engine-session/` | Official session header/event log in the local no-hash backend; used for new-format resume |
 
 Local source capture is broader than model delivery: a search can retain a scanned file locally while returning no text from it to the model. Indexed source counts in `coverage` do not prove that the model saw or reviewed those files. A diagnostic `matched` result only checks the recorded text, not whether that text was delivered or the bug is real.
 
@@ -291,17 +297,17 @@ python scripts/review.py --config config.json --history --outcome success --slow
 
 ### Recovery and resuming an unfinished review
 
-Temporary capacity or transport failures before generated output can retry the same request within the configured recovery window, honoring `Retry-After` with jittered backoff otherwise. Once reasoning or text has arrived, a deadline or interrupted stream can produce a checkpoint and continue the review. Authentication, parameter, policy, local I/O errors and operator cancellation do not trigger automatic recovery. The model is retained throughout.
+The official Harness retry service handles eligible capacity/transport failures and cancellable backoff, with the review policy admitting new attempts within the configured recovery window. Once reasoning or text has arrived, a deadline or interrupted stream can produce a checkpoint and continue the review. Authentication, parameter, policy, local I/O errors and operator cancellation do not trigger automatic recovery. The model is retained throughout.
 
-To continue an ended, unfinished run in a new directory:
+To continue an unfinished recorded review in a new directory:
 
 ```text
 python scripts/review.py --config config.json --resume "/path/to/unfinished-review" --output-dir "/path/to/new-review"
 ```
 
-Resume keeps the recorded model settings and captured file versions; newly explored files use the current selected repository view and are distinguished in the source records. The configured endpoint must match the original service. Add `--dry-run` to check restored materials and the current budget without a model call; `checkpoint_pending` means the progress summary will be generated only during the real run.
+Resume keeps the recorded model settings, endpoint, and captured file versions. New-format records restore the official session; older records import saved review progress and sources without replaying old API/tool calls. Newly explored files use the current selected repository view and are marked separately. Add `--dry-run` to prepare restoration material without a model call; `checkpoint_pending` means live continuation has not started.
 
-Every actual attempt retains its own directory and ledger entry. Failed-request time and retry waits are separated from successful-request time; the original run and its usage are retained without being charged again as new calls. Recovery can consume additional service quota and does not guarantee a completed report. See [recovery details](docs/architecture.md#api-异常恢复与跨进程续跑) for the classification and recording boundaries.
+Every actual attempt retains its own directory and ledger entry. Failed-request time and retry waits are separated from successful-request time; the original run and its usage are retained without being charged again as new calls. Recovery can consume additional service quota and does not guarantee a completed report. See [recovery details](docs/architecture.md#failure-recovery-and-resume) for the classification and recording boundaries.
 
 ### Packet mode: compatibility and replay
 
@@ -329,15 +335,16 @@ Real calls retain collected materials, explored source versions, requests, respo
 
 To update a cloned installation, run `git pull --ff-only` in its directory, then refresh the dedicated runtime using `python scripts/skill_runtime.py setup --download-official`. **Do not overwrite your personal `config.json` by copying the example again.** Compare new configuration fields and merge them manually if needed.
 
-Offline tests need no API key, Bailian CLI, or tokenizer downloads:
+After preparing the runtime above, run both offline suites; neither needs an API key, the Bailian CLI, or a live model:
 
 ```text
-python -m unittest discover -s scripts -p "test_*.py"
+node --test runtime/test_*.mjs
+python scripts/skill_runtime.py test
 ```
 
-Standard setup runs native-tokenizer checks; platform-specific tests may still be skipped. CI prepares the isolated runtime and official tokenizer assets, then runs offline tests without model calls. See [tokenizer installation (Chinese)](assets/deepseek_v4_tokenizer/README.md). Tokenizer JSON is not redistributed because its redistribution terms have not been established.
+Setup may download missing packages and tokenizer assets. Tests use local fixtures; platform-specific cases may be skipped. CI prepares Node 24, the isolated Python host and official assets, then exercises both the active Node runtime and Python host without model calls. See [tokenizer installation (Chinese)](assets/deepseek_v4_tokenizer/README.md). Tokenizer JSON is not redistributed because its redistribution terms have not been established.
 
-Licensed under [Apache-2.0](LICENSE); external components are described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This is a directly cloneable Skill source repository, not a published plugin-store package.
+Project-authored code is licensed under [Apache-2.0](LICENSE). Official Harness dependencies and the two extracted converters retain their upstream licenses, including their MIT notices; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This is a directly cloneable Skill source repository, not a published plugin-store package.
 
 ## Supplemental files, execution facts and progress
 

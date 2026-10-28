@@ -2,13 +2,13 @@
 
 [English](README.md) | 简体中文
 
-A Codex Skill for supplementary, repository-aware code review through an external model API.
+通过外部模型 API 补充独立、可探索仓库的代码审阅。
 
 主 GPT 只需提供项目、审阅目标、需求和已有测试证据。运行器自动收集初始改动，外部模型通过只读工具探索关联文件并提出发现，再由主会话核实、决定修改并验收。适合代码、测试、依赖、迁移和影响运行行为的配置变动；纯文档、规则说明和只读查询默认跳过。它不修改 Codex 主模型配置，报告也不等同于完整覆盖或审阅通过。
 
 ## 1. 安装 Skill
 
-需要 **Git、Python 3.10+、可运行本地脚本的 Codex，以及外部模型服务的 API key**。ChatGPT/Codex 的订阅登录不会替代这个外部 API key。无需先安装百炼 CLI；tokenizer 由环境准备命令下载，也可使用已有本地资产。
+需要 **Git、Python 3.10+、Node.js 24.9.0+（含 npm）、可运行本地脚本的 Codex，以及外部模型服务的 API key**。ChatGPT/Codex 的订阅登录不会替代这个外部 API key。百炼 CLI 可选；统一准备命令安装 Skill 独立 Python/Node 依赖和本地官方 tokenizer，也可使用已有资产。请先安装满足版本要求的 Node；准备命令会明确报告缺失或过旧版本，不替你修改系统 Node。
 
 以下按首次安装编写，Windows 与 macOS/Linux 选一组。目标目录应尚不存在；已有安装请看文末更新说明，执行某一步报错后先处理错误。
 
@@ -25,6 +25,8 @@ git clone https://github.com/L1pp/codex-third-party-review.git $skillDir
 ```powershell
 Set-Location $skillDir
 python --version
+node --version
+npm --version
 python scripts/skill_runtime.py setup --download-official
 Copy-Item config.example.json config.json
 ```
@@ -41,11 +43,13 @@ git clone https://github.com/L1pp/codex-third-party-review.git "$HOME/.agents/sk
 ```bash
 cd "$HOME/.agents/skills/third-party-code-review"
 python3 --version
+node --version
+npm --version
 python3 scripts/skill_runtime.py setup --download-official
 cp config.example.json config.json
 ```
 
-安装会在 Skill 自己的 `.venv` 中准备 `json-repair`、原生 `tokenizers`、Jinja2 等依赖，并检查本地官方 tokenizer；不会调用模型或读取密钥。入口会自动切换到这套独立环境，保留项目工作目录，项目虚拟环境无需另装依赖。已有配置、审阅日志和完整 tokenizer 资产保留。
+统一准备命令在 Skill 内创建 `.venv`，安装 Python 主机依赖、核对本地官方 tokenizer，并将 `runtime/package.json` 中的精确 Node 依赖装到 `runtime/node_modules`。npm 禁用生命周期脚本、audit 和 funding 操作。准备过程不调用模型、不读取 key、不覆盖个人配置，也不修改每个项目的环境。真实审阅通过 Node bridge 使用官方 Harness AgentLoop；Python 保留只读材料、日志和报告适配。只读查询和 dry-run 不自动补装缺失依赖。
 
 已下载官方 tokenizer 时可以使用本地目录：
 
@@ -61,7 +65,7 @@ python scripts/review.py --runtime-info
 
 隔离解释器会忽略继承的 Python 搜索路径和用户级包；这不是操作系统沙箱。
 
-用户级目录 `~/.agents/skills/third-party-code-review/` 可供多个项目使用。只想在一个项目使用，也可把完整仓库放到该项目的 `.agents/skills/third-party-code-review/`。必须保留 `SKILL.md`、`scripts/`、配置示例及支持文件的相对位置，不能只复制 `SKILL.md`。具体发现方式见 [OpenAI 官方 Skill 文档](https://learn.chatgpt.com/docs/build-skills)。未出现在 Skill 列表时，重新打开 Codex。
+用户级目录 `~/.agents/skills/third-party-code-review/` 可供多个项目使用。只想在一个项目使用，也可把完整仓库放到该项目的 `.agents/skills/third-party-code-review/`。必须保留 `SKILL.md`、`scripts/`、`runtime/`（含包清单和带归属的 vendor 文件）、配置示例及支持文件的相对位置，不能只复制 `SKILL.md` 或 `scripts/`。具体发现方式见 [OpenAI 官方 Skill 文档](https://learn.chatgpt.com/docs/build-skills)。未出现在 Skill 列表时，重新打开 Codex。
 
 ## 2. 配置 API key
 
@@ -139,7 +143,7 @@ mkdir -p "$HOME/.config/third-party-code-review"
 
 一次工作流开始时选择路由；同一轮取材或压缩续审跨过边界也不会中途换模型。checkpoint 压缩使用独立的较小输出预算，但不切换已选模型。`auto` 由服务端决定实际路由，本项目不能据此确认背后的模型。表中上限是配置与已知服务适配假设，不是任意账号、任意模型的实时能力保证。
 
-默认上下文为 1,000,000 token，优先内联约 100,000 个本地估算 token 的材料。DeepSeek 采用已发布 DSH 的 256,000 输出默认值，保持 max 思考。每次请求前预留完整输出和 65,536 token 余量，以窗口的 80% 和剩余输入预算中较小者判断压力（DeepSeek 默认预计输入阈值为 678,464）。达到压力阈值后先本地缩减可重读的旧工具结果，必要时摘要旧进度并保留完整近期对话；不在生成中强制截流压缩。即使初始材料全部内联，仓库探索工具仍可使用，审阅者可以自行查找调用方、契约、配置和相关测试，无需主会话逐文件复制。本地估算不等于服务端 `usage`。DeepSeek 原生计数依赖由独立运行环境准备，auto 仍明确使用保守估算，详见 [架构与边界](docs/architecture.md)。
+默认仍为 **1,000,000 token 上下文**、初始约 **100,000 个本地估算材料 token 直接内联**，DeepSeek **max** 与 **256,000 输出**。实时压力由 Node 中同一原生计量适配提供给官方 Harness 压缩/裁剪服务；每次预留完整输出和 65,536 headroom，在窗口 80% 与剩余输入空间两者较小时处理压力，默认 DeepSeek 阈值为 678,464。先裁剪旧工具文本，再摘要平衡历史，只有完整且更小的 checkpoint 才提交。Python 计数只负责初始材料选择和离线准备，不是第二套实时压力引擎；不打断正在生成的流。模型仍可自主探索关联文件。本地估算不等于供应商 usage，见[架构](docs/architecture.md)和[官方模块复用清单](docs/harness-reuse.md)。
 
 **如果不想按时间切换：**修改 `config.json` 中的完整 `day` / `night` 路由，不要只改模型名、却留下另一个模型的思考和输出参数。例如全天使用 DeepSeek 时，用下面的两段替换原有 `day` / `night`，保留其他顶层字段：
 
@@ -169,7 +173,8 @@ mkdir -p "$HOME/.config/third-party-code-review"
 | `base_url` | HTTPS 基础地址，脚本追加 `/chat/completions`，不要重复填写该后缀 |
 | `model_catalog_file` | 可选公共目录缓存；相对路径以配置文件目录为基准；缺少时仍可运行，不会隐式联网刷新 |
 | `ledger_file` | 可选 SQLite 台账路径；相对路径以命令当前目录为基准，建议绝对路径；默认在 Skill 的 `logs/` 下 |
-| `automatic_retries` | 保持 `0`；底层每次调用只执行一次请求，恢复由工作流统一处理 |
+| `node_executable` | 可选 Node 可执行文件路径或名称；默认从 PATH 查找，需 24.9.0+ |
+| `automatic_retries` | 保持 `0`；单次底层接口仍只产生一次 attempt，实时工作流恢复由官方 Harness retry 服务管理 |
 | `api_recovery.retry_window_seconds` | 默认 `120`；无有效生成进度的暂时错误允许启动重试的时间窗口，`0` 禁用这类重试 |
 | `context_management.max_model_calls` / `max_compactions` | 默认 `null`，没有固定次数上限；正整数可限制。`0` 是兼容的无限制别名，不能用于禁止调用 |
 
@@ -256,6 +261,7 @@ python scripts/review.py --config config.json --repo "/path/to/project" --worksp
 | `sources/index.json`、`sources/source-0001.txt` 等 | 本地源码顺序记录，包括搜索扫描过但未命中的文件 |
 | `report_diagnostics.json` | 派生字段、定位、证据诊断，以及恢复报告候选和修复日志；原始报告单独保留 |
 | `adjudication.json` | 主会话裁决，初始为 pending，不自动代表通过 |
+| `engine-session/` | 官方 Session 的本地 header/event log；由无哈希后端保存，供新格式恢复 |
 
 本地来源记录与模型收到的内容不同：搜索可能在本地保留扫描文件全文，却不向模型返回该文件的任何文本。`coverage` 中的索引数量不证明模型已看到或审阅这些文件；诊断 `matched` 只核验实际记录文本，不证明文本已投递或 Bug 成立。
 
@@ -287,17 +293,17 @@ python scripts/review.py --config config.json --history --outcome success --slow
 
 ### 异常恢复与继续未完成的审阅
 
-尚未生成有效正文或推理时，暂时容量或传输错误可在恢复窗口内重试同一请求，优先遵守 `Retry-After`，否则使用带抖动的退避。已有推理或正文时，服务端 deadline 或断流可先形成 checkpoint 再继续审阅。认证、参数、策略拒绝、本地 I/O 错误和人工取消不会自动恢复，过程中保留原模型。
+官方 Harness retry 服务负责符合条件的容量/传输错误、退避和可取消等待；审阅策略在配置的恢复窗口内决定是否发起下一次 attempt。已有推理或正文时，服务端 deadline 或断流可先形成 checkpoint 再继续审阅。认证、参数、策略拒绝、本地 I/O 错误和人工取消不会自动恢复，过程中保留原模型。
 
-已结束的未完成记录可以续跑到新目录：
+未完成的已有审阅记录可续跑到新目录：
 
 ```text
 python scripts/review.py --config config.json --resume "/path/to/unfinished-review" --output-dir "/path/to/new-review"
 ```
 
-续跑保留原模型参数及已捕获的文件版本；新探索的文件按当前所选仓库视图读取，并在来源记录中区分。配置的 endpoint 必须与原服务相同。加 `--dry-run` 仅检查恢复材料和当前预算，不调用模型；`checkpoint_pending` 表示真实运行时才会生成进度摘要。
+续跑保留原模型参数、endpoint 和已捕获的文件版本。新格式恢复官方 Session，旧格式导入已保存进度与来源，不将旧 API 或工具调用重新执行。新探索文件按当前所选仓库视图读取并分别标记。加 `--dry-run` 只准备恢复材料，不调用模型；`checkpoint_pending` 表示真实续审尚未启动。
 
-每次真实请求都有独立目录和台账项，失败耗时、重试等待与成功请求耗时分开记录；原运行及其 usage 保留，不重算为新调用。恢复可能消耗额外额度，也不保证最终形成完整报告。分类和记录边界见[架构说明](docs/architecture.md#api-异常恢复与跨进程续跑)。
+每次真实请求都有独立目录和台账项，失败耗时、重试等待与成功请求耗时分开记录；原运行及其 usage 保留，不重算为新调用。恢复可能消耗额外额度，也不保证最终形成完整报告。分类和记录边界见[架构说明](docs/architecture.md#failure-recovery-and-resume)。
 
 ### Packet 模式：兼容与回放
 
@@ -325,15 +331,16 @@ Packet 模式仅使用已提供的材料，需要时通过受限快照工具读/
 
 更新已克隆的 Skill 时，在该目录执行 `git pull --ff-only`，随后用同一 Python 再执行 `python scripts/skill_runtime.py setup --download-official`。**不要重新复制示例覆盖个人 `config.json`。** 新版本如增加配置字段，请对照示例手动合并。
 
-离线测试无需 API key、百炼 CLI 或 tokenizer 下载：
+先按上文准备运行环境，再运行两组离线测试；均不需要 API key、百炼 CLI 或真实模型：
 
 ```text
-python -m unittest discover -s scripts -p "test_*.py"
+node --test runtime/test_*.mjs
+python scripts/skill_runtime.py test
 ```
 
-标准安装会执行原生 tokenizer 检查；仅平台专属测试按环境跳过。CI 在独立环境中准备依赖和官方资产，然后只运行离线测试，不调用模型。tokenizer 的获取与依赖见 [安装说明](assets/deepseek_v4_tokenizer/README.md)，本仓库不再分发其 JSON，尚未核明再分发条件。
+环境准备可能下载缺失的包和 tokenizer，测试使用本地 fixture，平台专属项目可跳过。CI 准备 Node 24、独立 Python 及官方资产，随后检查实际 Node 运行器和 Python 主机，不调用模型。tokenizer 的获取与依赖见 [安装说明](assets/deepseek_v4_tokenizer/README.md)，本仓库不再分发其 JSON，尚未核明再分发条件。
 
-本项目按 [Apache-2.0](LICENSE) 发布；外部依赖见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。这是可直接克隆的 Skill 源码，并非插件商店上架包。
+本项目自有代码按 [Apache-2.0](LICENSE) 发布；官方 Harness 依赖与两份提取转换器保留其各自许可及 MIT 归属，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。这是可直接克隆的 Skill 源码，并非插件商店上架包。
 
 ## 补充文件、执行事实与进度
 

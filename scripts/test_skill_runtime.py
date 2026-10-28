@@ -1,4 +1,7 @@
-"""Offline environment-isolation and full-output reservation regressions."""
+"""Offline environment isolation and dependency readiness regressions.
+
+Live pressure/output reservation is covered by the official Node runtime tests.
+"""
 import copy
 import io
 import json
@@ -11,7 +14,6 @@ from importlib.metadata import PackageNotFoundError
 import unittest
 from unittest.mock import patch
 
-import context_budget
 import skill_runtime
 
 
@@ -140,26 +142,6 @@ class SkillRuntimeTests(unittest.TestCase):
                     skill_runtime.launch_in_runtime(entry,require_tokenizer=True)
             self.assertEqual(raised.exception.code,2)
 
-    def test_old_budget_is_compacted_instead_of_sending_3661_tokens(self):
-        route={"model":"deepseek-v4.1-flash-1017","max_tokens":393216}
-        config={"context_window_tokens":1_000_000,"context_management":{"safety_tokens":2048,"compression_trigger_ratio":0.9}}
-        with patch.object(context_budget,"estimate_tokens",return_value={"input_tokens":894291,"method":"recorded_upper_bound"}):
-            blocked=context_budget.plan_budget([],[],route,config)
-        self.assertTrue(blocked["needs_compaction"])
-        self.assertEqual(blocked["effective_output_tokens"],0)
-        self.assertEqual(blocked["generation_reserve_tokens"],393216)
-        with patch.object(context_budget,"estimate_tokens",return_value={"input_tokens":220437,"method":"recorded_actual_usage"}):
-            ready=context_budget.plan_budget([],[],route,config)
-        self.assertFalse(ready["needs_compaction"])
-        self.assertEqual(ready["effective_output_tokens"],393216)
-
-    def test_incompatible_output_configuration_is_explicit_not_low_budget(self):
-        with patch.object(context_budget,"estimate_tokens",return_value={"input_tokens":100,"method":"offline"}):
-            result=context_budget.plan_budget([],[],{"model":"offline","max_tokens":10000},
-                 {"context_window_tokens":5000,"context_management":{"safety_tokens":10}})
-        self.assertTrue(result["output_budget_exceeds_context"])
-        self.assertTrue(result["needs_compaction"])
-        self.assertEqual(result["effective_output_tokens"],0)
 
 
 if __name__=="__main__":unittest.main()

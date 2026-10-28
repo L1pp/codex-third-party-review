@@ -1,40 +1,57 @@
 # Third-party notices
 
-本项目自身代码与文档按根目录 [LICENSE](LICENSE) 中的 Apache License 2.0 发布。以下列出外部工具、依赖和资产边界；本文件不改变各自许可证。
+Project-authored code and documentation are licensed under the root [Apache License 2.0](LICENSE). The components below retain their own terms. This document does not relicense upstream code, dependencies, downloaded assets, or provider services.
 
-## 外部官方百炼 CLI
+## DeepSeek Harness
 
-本项目通过官方阿里云百炼 CLI（`bl`）的公开命令复用模型目录与本机配置能力，CLI 在用户机器上单独安装。本仓库未复制或再分发其 TypeScript 源码、打包产物或依赖。
+The active runtime directly depends on official packages from [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness), licensed under [MIT](https://github.com/deepseek-ai/deepseek-harness/blob/master/LICENSE), copyright (c) 2026 DeepSeek. Exact package versions are declared in [runtime/package.json](runtime/package.json); the current integration uses Harness `0.2.1-rc.2` and Cordis `4.0.5`. Installed packages remain under the Skill's ignored `runtime/node_modules` directory and are not vendored into this repository.
 
-官方上游为 [modelstudioai/cli](https://github.com/modelstudioai/cli)，采用 [Apache-2.0](https://github.com/modelstudioai/cli/blob/main/LICENSE)。SSE 分块边界处理参考其 [core/client/stream.ts](https://github.com/modelstudioai/cli/blob/main/packages/core/src/client/stream.ts) 的换行完整性约束，采用独立 Python 状态机并以 Requests 真实解码器离线验证；未内嵌其 TypeScript 实现。CLI 的供应商服务和账号权限仍由其自身规则决定。项目名称用于说明兼容对象，不表示阿里云为本项目背书。
+The following focused source extracts are redistributed with their complete MIT copyright and permission notice in each file:
 
-## Python 包
-
-依赖由用户或 CI 从 Python 包索引单独安装，本仓库未内置这些包。完整及传递依赖的许可证应以所安装发行版的许可文件为准。
-
-| 包 | 用途 | 上游 |
+| Local file | Upstream source | Adaptation |
 | --- | --- | --- |
-| Requests | HTTPS 与 SSE 流读取 | [psf/requests](https://github.com/psf/requests) |
-| tzdata | IANA 时区数据 | [python/tzdata](https://github.com/python/tzdata) |
-| json-repair（必需，MIT） | 本地恢复模型报告的 JSON 语法；不执行模型调用 | [mangiucugna/json_repair](https://github.com/mangiucugna/json_repair) |
-| tenacity（必需，Apache-2.0） | 本地 Windows 原子替换的短时占用重试，以及工作流暂时 API 故障的退避策略 | [jd/tenacity](https://github.com/jd/tenacity) |
-| tokenizers（CLI 默认安装） | 本地分词 | [huggingface/tokenizers](https://github.com/huggingface/tokenizers) |
-| Jinja2（CLI 默认安装） | 渲染本地 chat template | [pallets/jinja](https://github.com/pallets/jinja) |
+| `runtime/vendor/dsh-pi-replay.mjs` | Published `@deepseek-ai/dsh-llm-pi-ai@0.2.1-rc.2` bundle; upstream `packages/llm/llm-pi-ai/src/replay.ts` and message projection helpers | Retained as the Harness/pi-ai message replay conversion seam |
+| `runtime/vendor/dsh-pi-stream.mjs` | Published `@deepseek-ai/dsh-llm-pi-ai@0.2.1-rc.2` bundle; upstream `packages/llm/llm-pi-ai/src/stream.ts` | Includes the upstream-main malformed-tool-argument validation backport; stream conversion is upstream-derived |
 
-`json-repair` 按 [MIT 许可证](https://github.com/mangiucugna/json_repair/blob/main/LICENSE) 单独分发，由依赖清单安装；本仓库未复制或内嵌其源码。报告选择、完整性诊断和主会话裁决逻辑仍由本项目实现。安装发行版自带的版权和许可文件继续适用，本项目的 Apache-2.0 不替代它们。
+The project's Apache-2.0 license does not replace these MIT notices. Bailian wire-field mapping, local no-hash storage, source/range capture, report completeness and adjudication, and the host-process bridge are project-specific adapters. The ordinary agent/session/retry/prune/compaction algorithms are provided by the declared upstream packages rather than a second Python loop. See [the reuse inventory](docs/harness-reuse.md) for ownership and deliberate exclusions.
 
-`tenacity==9.2.1` 依据其[发行版许可声明](https://pypi.org/project/tenacity/9.2.1/)以 Apache-2.0 单独分发。本仓库通过依赖安装调用其重试策略，没有复制或内嵌库源码。本地文件提交与 API 恢复分别使用独立策略；API 请求由工作流显式发出，每次 attempt 单独记录，不在 HTTP 客户端中隐藏重试。
+## Node dependencies
 
-## API 恢复设计参考
+Direct versions are fixed in `runtime/package.json`. Runtime setup installs them without npm lifecycle scripts, audit, or funding operations. Their full and transitive license terms are those of the installed distributions.
 
-错误恢复的等待设计参考 [OpenAI Python SDK](https://github.com/openai/openai-python/blob/main/src/openai/_base_client.py) 的暂时错误与 `Retry-After` 处理，checkpoint 衔接参考 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/compaction/compaction-basic/src/index.ts)。本仓库没有复制、内嵌或再分发这些实现，运行时也不依赖这两套 SDK/CLI；本地来源恢复、attempt 留痕和审阅完整性判断为本项目的独立适配。
+| Package family | Use | Upstream |
+| --- | --- | --- |
+| DeepSeek Harness and Cordis | Agent loop, session/events, tool execution, retry, timeout, compaction and pruning | [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) |
+| `@earendil-works/pi-ai` | Maintained OpenAI-compatible protocol and tool/reasoning stream handling | [earendil-works/pi](https://github.com/earendil-works/pi) |
+| `eventsource-parser` | SSE framing in the maintained transport stack | [rexxars/eventsource-parser](https://github.com/rexxars/eventsource-parser) |
+| `@huggingface/tokenizers`, `@huggingface/jinja` | Local native-tokenizer and chat-template estimation | [huggingface/tokenizers.js](https://github.com/huggingface/tokenizers.js), [huggingface/huggingface.js](https://github.com/huggingface/huggingface.js) |
 
-## DeepSeek tokenizer（不随仓库分发）
+Provider SDKs pulled transitively by pi-ai retain their own licenses. Installing a dependency does not enable unrelated provider accounts, shell tools, telemetry exporters, or model routes.
 
-可选安装器仅从用户选定的本地目录/归档，或显式请求的官方下载中读取 `tokenizer.json` 与 `tokenizer_config.json`。官方来源为 [DeepSeek Token 用量文档](https://api-docs.deepseek.com/zh-cn/quick_start/token_usage/) 链接的归档。本项目尚未核明这些 JSON 的再分发许可，因此仓库和发布内容不包含它们；使用前请核对官方来源、适用条件与所用模型。
+## Python dependencies
 
-安装器不执行归档内的 Python 文件，不复制其他文件，也不进行 hash、指纹或冻结验证。本地资产不是本项目 Apache-2.0 许可的组成部分。
+Python dependencies are installed separately from the Python package index; their source is not embedded here.
+
+| Package | Use | Upstream |
+| --- | --- | --- |
+| Requests | Host downloads/catalog and compatible offline helpers; not the live model transport | [psf/requests](https://github.com/psf/requests) |
+| tzdata | IANA time zones | [python/tzdata](https://github.com/python/tzdata) |
+| json-repair `0.64.2` (MIT) | Local model-report syntax recovery without a model call | [mangiucugna/json_repair](https://github.com/mangiucugna/json_repair) |
+| tenacity `9.2.1` (Apache-2.0) | Local Windows atomic-file-replacement retry policy | [jd/tenacity](https://github.com/jd/tenacity) |
+| tokenizers and Jinja2 | Initial material-prefix selection and local preparation with the official assets | [huggingface/tokenizers](https://github.com/huggingface/tokenizers), [pallets/jinja](https://github.com/pallets/jinja) |
+
+The project uses json-repair's installed parser and retains its own report selection, possible-loss checks and host adjudication. It does not copy the library's source. Tenacity remains a local file-I/O dependency; live API retry execution is supplied by Harness.
+
+## Alibaba Cloud Bailian CLI
+
+The optional [official CLI](https://github.com/modelstudioai/cli) supplies public model-catalog commands and an existing local profile format. It is installed separately and is not required for ordinary reviews. This repository does not copy or redistribute its TypeScript source or bundled dependencies. The upstream [Apache-2.0 license](https://github.com/modelstudioai/cli/blob/main/LICENSE) and service/account rules continue to apply. Compatibility descriptions do not imply vendor endorsement.
+
+## DeepSeek tokenizer assets
+
+`tokenizer.json` and `tokenizer_config.json` are installed locally from a user-supplied directory/archive or the explicitly requested official archive linked by [DeepSeek's token-usage documentation](https://api-docs.deepseek.com/zh-cn/quick_start/token_usage/). Their redistribution terms have not been established here, so this repository and its releases exclude them.
+
+The installer reads only the selected JSON assets; it does not execute Python files from the archive, copy unrelated files, or perform hash/fingerprint/freeze verification. The assets are not relicensed under this project's Apache-2.0 license.
 
 ## GitHub Actions
 
-CI 使用 GitHub 的 `actions/checkout` 与 `actions/setup-python`，在 GitHub 运行时按工作流引用获取；它们的源码未在本仓库内分发。上游分别见 [checkout](https://github.com/actions/checkout) 与 [setup-python](https://github.com/actions/setup-python)。
+CI obtains [actions/checkout](https://github.com/actions/checkout), [actions/setup-python](https://github.com/actions/setup-python), and [actions/setup-node](https://github.com/actions/setup-node) at the versions named in the workflow. Their source is not redistributed here. CI prepares package/assets separately and runs offline fixtures without model credentials.

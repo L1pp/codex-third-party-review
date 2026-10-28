@@ -2,13 +2,13 @@
 
 ## 官方能力与本项目适配层
 
-本项目保留已有 Python 审阅运行时。百炼模型目录通过官方 `bl model` 命令及其目录/补全数据服务复用，而不是在仓库中复制一套官方模型目录、价格表或登录实现。官方 CLI 负责登录与本机配置；审阅入口可读取配置指定 profile 中的现有 `api_key`，环境变量优先。
+当前实时审阅由官方 DeepSeek Harness 的 Node AgentLoop、Session、Retry、Tools 和 Compaction 服务驱动；Python 保留仓库材料、路由、日志、诊断、裁决及轻量台账。逐模块取舍与具体实现见 [Harness 复用清单](harness-reuse.md)，调用边界见 [架构说明](architecture.md)。百炼模型目录继续通过官方 `bl model` 命令及其目录/补全数据服务复用，不复制官方模型目录、价格表或登录实现。官方 CLI 负责登录与本机配置；审阅入口可读取配置指定 profile 中的现有 `api_key`，环境变量优先。
 
 官方来源见 [modelstudioai/cli](https://github.com/modelstudioai/cli) 及 [阿里云模型目录命令文档](https://help.aliyun.com/en/model-studio/cli/config)。
 
 官方 CLI 是外部可选工具，不是审阅入口的 Python 依赖，也不会被自动安装或触发登录。目录辅助功能与实际审阅模型调用是两条独立路径；目录结果不保证该账号具备模型权限，价格或限额也不构成服务承诺。具体目录适配接口以仓库中的适配脚本与其说明为准。
 
-本次没有复制或再分发百炼 CLI 的 TypeScript 源文件，没有引入 Node 桥接层。HTTP/SSE、材料工具、预算、日志与台账仍由本仓库 Python 代码实现。参考官方接口、设计边界或测试思路，不等于内置或完整实现官方 CLI。
+本项目未复制百炼 CLI 的 TypeScript 源文件。实际模型调用现通过 Skill 独立 Node 依赖中的维护版 pi-ai OpenAI 协议实现，通用循环、重试和压缩由官方 Harness 负责；原 Python Requests/SSE 模型路径已退出。Node 依赖与必要的带 MIT 许可转换器属于本次真实复用范围，不能再描述为仅参考公式或边界。
 
 目录辅助入口是 `scripts/bailian_catalog.py`。只有显式 `refresh` 会启动官方 CLI 并联网读取公共目录，不调用审阅模型、不登录或更新凭据；`lookup` 只读取本地缓存：
 
@@ -25,11 +25,13 @@ python scripts/bailian_catalog.py lookup --model deepseek-v4.1-flash-1017
 
 官方项目来源和许可证见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。当上游 CLI 的命令输出变动时，应更新本项目适配层及离线 fixture，不应静默推断缺失字段。
 
-## 为什么保留现有调用层
+## 协议接入与调用层替换
 
-本次按 CLI 2.5.1 的 [text/chat 实现](https://github.com/modelstudioai/cli/blob/main/packages/commands/src/commands/text/chat.ts) 核查：它适合一般单次模型调用，但流式 JSON 结果聚合的是 `content`，没有给本工作流完整保留推理、工具调用、用量和终止状态。命令参数也不能直接表达当前 Token Plan 使用的全部推理与组合输出配置。因此没有把请求层简单替换成 `bl text chat`，也没有为包装 TypeScript core 额外增加 Node 桥接进程。
+百炼 CLI 继续用于可选目录查询和已有 profile，不作为审阅循环。官方 Harness 原生 DeepSeek adapter 使用 Messages 协议，当前 Token Plan 使用 OpenAI-compatible Chat Completions，不能只替换 base URL。`runtime/adapter.mjs` 采用 Harness 所用的 pi-ai OpenAI 协议模块，配合带 MIT 归属的 Harness replay/stream 转换器，保留 `reasoning_content`、工具分片、实际 usage、组合输出参数和原始响应记录。
 
-可直接复用的是官方公共目录与现有凭据配置；SSE 换行边界处理作为实现参考并加入真实解码器回归。仓库自动取材、只读探索、分层清理与压缩续审、完整响应归档、诊断和轻量台账继续由 Python 运行时负责。以后官方 CLI 若提供完整机器可读流事件，再评估收敛请求层；这不是对未来版本能力的判断。
+`runtime/engine.mjs` 直接使用官方 AgentLoop、Session、Retry 和 rc.2 原生 Tools 执行器；`runtime/context.mjs` 在同一精确计量适配上接入官方 BasicCompactionEngine 与 ToolResultPruner。`scripts/workflow.py` 现在只是兼容入口，不再保留另一套实时循环。单次 `review.run_review(...)` 也走同一官方协议模块，但仍只产生一次 attempt，不隐式执行工具或重试。
+
+上游存储的部分路径使用哈希或校验和，因此没有原样启用 stock JSONL/spill/锁后端。`runtime/persistence.mjs` 是窄的无哈希存储适配；事件验证、会话投影、重放和中断修复仍交给官方服务。Git 视图、来源 ID/实际投递范围、100k 初始内联、审阅报告完整性和主会话裁决属于本项目契约，继续保留。
 
 ## 通用 JSON 修复
 
@@ -39,7 +41,7 @@ python scripts/bailian_catalog.py lookup --model deepseek-v4.1-flash-1017
 
 ## 仓库取材与报告诊断的参考
 
-仓库模式采用自动取材加只读探索，快照改为记录实际读到的内容；旧 packet 模式继续用于材料限定和回放。此调整保留现有 Python 请求、预算和日志层。
+仓库模式采用自动取材加只读探索，快照改为记录实际读到的内容；旧 packet 模式继续用于材料限定和回放。材料和日志适配保留在 Python，实际请求、会话及压缩驱动已迁入上述官方 Node 服务。
 
 比较同类实现后，主要参考了以下设计方向：
 
@@ -51,10 +53,10 @@ python scripts/bailian_catalog.py lookup --model deepseek-v4.1-flash-1017
 
 ## 本次发布包含什么
 
-- Skill 入口、Python 审阅运行时与离线测试。
+- Skill 入口、Python 材料/记录适配、Node 官方服务组合、带归属的转换器与离线测试。
 - 不含秘密的配置示例、可选 tokenizer 安装器及说明。
 - 依赖清单和 CI 定义。
 
 不包含 API key、个人 `config.json`、审阅包、请求/响应日志、台账数据库，也不包含 DeepSeek tokenizer JSON。用户本机自行安装的官方 CLI 与可选资产继续适用各自的许可证、服务条款和账户规则；本项目的 Apache-2.0 不会重新许可这些内容。
 
-独立运行环境通过 Python 标准库 `venv` 创建，原生计数复用 `tokenizers` 和官方 JSON/模板，不执行下载目录中的上游 Python 代码。运行环境不进入 Git；依赖和本地资产的准备不调用模型。
+独立 Python 环境通过标准库 `venv` 创建；初始材料选择使用 Python tokenizer，实时压力由 Node 原生计量适配统一管理，同样读取本地官方 JSON/模板。Node 依赖固定在 `runtime/package.json` 并安装到 Skill 自己的 `runtime/node_modules`；不修改项目环境，不执行下载目录中的上游 Python 文件。环境、依赖产物和 tokenizer JSON 不进入 Git，准备过程不调用模型。

@@ -25,6 +25,7 @@ jobs:
     env:
       PYTHONUTF8: "1"
       BAILIAN_TOKEN_PLAN_API_KEY: ""
+      DEEPSEEK_API_KEY: ""
     steps:
       - uses: actions/checkout@v7
         with:
@@ -34,7 +35,13 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: requirements*.txt
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
       - name: Prepare isolated Skill runtime and official tokenizer assets
         run: python scripts/skill_runtime.py setup --download-official
-      - name: Run offline unit tests without model calls
+      - name: Run official-runtime adapter fixtures without model calls
+        run: node --test runtime/test_*.mjs
+      - name: Run Python host fixtures without model calls
         run: python scripts/skill_runtime.py test

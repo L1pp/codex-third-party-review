@@ -1,83 +1,51 @@
-"""Transport edge cases informed by the upstream CLI SSE boundary handling.
-
-These tests use requests' real UTF-8 decoder, not a provider or network service.
-"""
-import io
+"""Physical wire-audit fixtures; provider parsing belongs to the official SDK."""
 import json
+from pathlib import Path
+import tempfile
 import unittest
-import requests
-
-import review
+from harness_records import WireAudit
 
 
-class ByteFragments(io.BytesIO):
-    def read(self, amount=-1):
-        return super().read(1 if amount < 0 else min(amount, 1))
+class WireAuditTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name)
+    def audit(self,wire,*,key=None,chunks=None,name="call"):
+        root=self.root/name;root.mkdir()
+        audit=WireAudit(root,key);audit.metadata(200,{"content-type":"text/event-stream; charset=latin-1"})
+        raw=wire.encode("utf-8")
+        for part in chunks or [raw]:audit.feed(part)
+        audit.close()
+        return [json.loads(row) for row in (root/"response_stream.jsonl").read_text(encoding="utf-8").splitlines()]
+    def test_utf8_crlf_multiline_comments_and_original_lines_are_retained(self):
+        wire=': heartbeat\r\nid: event-1\r\nevent: message\r\ndata: {"choices":[{"delta":\r\ndata: {"content":"中文  内容"}}]}\r\n\r\ndata: [DONE]\r\n\r\n'
+        rows=self.audit(wire);lines=[row["line"] for row in rows]
+        self.assertIn(": heartbeat",lines);self.assertIn("id: event-1",lines)
+        self.assertIn("event: message",lines);self.assertIn('data: {"content":"中文  内容"}}]}',lines)
+        self.assertIn("data: [DONE]",lines)
+    def test_line_endings_and_significant_spaces_survive_bytewise_input(self):
+        for n,ending in enumerate(("\n","\r","\r\n")):
+            wire='data: {"choices":[{"delta":{"content":"  spaced  "}}]}'+ending+ending
+            raw=wire.encode();rows=self.audit(wire,chunks=[raw[i:i+1] for i in range(len(raw))],name=str(n))
+            self.assertIn('"  spaced  "',rows[0]["line"])
+            self.assertTrue(rows[0]["event_complete"])
+    def test_split_utf8_is_not_replaced_by_the_conflicting_http_charset(self):
+        wire='data: {"choices":[{"delta":{"reasoning_content":"中文🙂"}}]}\n\n'
+        raw=wire.encode();rows=self.audit(wire,chunks=[raw[:49],raw[49:50],raw[50:51],raw[51:]])
+        text=''.join(row["line"] for row in rows)
+        self.assertIn("中文🙂",text);self.assertNotIn("�",text)
+    def test_unterminated_received_event_is_saved_as_partial(self):
+        wire='data: {"choices":[{"delta":{"reasoning_content":"received before disconnect"}}]}'
+        rows=self.audit(wire)
+        self.assertIn("received before disconnect",rows[0]["line"])
+        self.assertFalse(rows[0]["event_complete"])
+    def test_credential_split_between_reasoning_and_content_events_is_redacted(self):
+        key="sk-cross-event-audit-secret"
+        events=[{"choices":[{"delta":{"reasoning_content":key[:10]}}]},
+                {"choices":[{"delta":{"content":key[10:]}}]}]
+        wire=''.join('data: '+json.dumps(event)+'\n\n' for event in events)
+        rows=self.audit(wire,key=key)
+        text=json.dumps(rows)
+        self.assertNotIn(key,text);self.assertNotIn(key[:10],text);self.assertIn("[REDACTED]",text)
 
-
-def response_for(text):
-    response = requests.Response()
-    response.status_code = 200
-    response.encoding = "utf-8"
-    response.raw = ByteFragments(text.encode("utf-8"))
-    return response
-
-
-class SSETransportTests(unittest.TestCase):
-    def test_utf8_crlf_multiline_events_preserve_text_and_raw_lines(self):
-        text = ': heartbeat\r\nid: event-1\r\nevent: message\r\ndata: {"choices":[{"delta":\r\ndata: {"content":"中文  内容"}}]}\r\n\r\ndata: [DONE]\r\n\r\n'
-        lines = []
-        events = list(review.sse_events(response_for(text), on_line=lines.append))
-        self.assertEqual(json.loads(events[0])["choices"][0]["delta"]["content"], "中文  内容")
-        self.assertEqual(events[-1], "[DONE]")
-        self.assertIn(": heartbeat", lines)
-        self.assertIn("id: event-1", lines)
-        self.assertIn("event: message", lines)
-
-    def test_line_ending_styles_and_meaningful_spaces_are_preserved(self):
-        for ending in ("\n", "\r", "\r\n"):
-            with self.subTest(ending=repr(ending)):
-                lines = []
-                calls = []
-                text = "data:   leading  spaces" + ending + "data:\tvalue" + ending * 2
-                events = list(review.sse_events(response_for(text), on_line=lines.append,
-                    on_event=lambda value, complete: calls.append((value, complete))))
-                self.assertEqual(events, ["  leading  spaces\n\tvalue"])
-                self.assertEqual(lines, ["data:   leading  spaces", "data:\tvalue", ""])
-                self.assertEqual(calls, [(events[0], True)])
-
-    def test_sse_uses_utf8_even_with_a_conflicting_http_encoding(self):
-        response = response_for('data: {"value":"中文"}\r\n\r\n')
-        response.encoding = "latin-1"
-        events = list(review.sse_events(response))
-        self.assertEqual(json.loads(events[0]), {"value": "中文"})
-
-    def test_received_partial_line_is_logged_before_transport_error(self):
-        class InterruptedFragments(ByteFragments):
-            def read(self, amount=-1):
-                chunk = super().read(amount)
-                if not chunk:
-                    raise requests.ReadTimeout("test interruption")
-                return chunk
-        text = 'data: {"choices":[{"delta":{"reasoning_content":"已接收"}}]}'
-        response = response_for(text)
-        response.raw = InterruptedFragments(text.encode("utf-8"))
-        lines = []
-        events = []
-        with self.assertRaises(requests.ReadTimeout):
-            for event in review.sse_events(response, on_line=lines.append):
-                events.append(event)
-        self.assertEqual(lines, [text])
-        self.assertEqual(events, [])  # A transport error does not complete the event.
-
-    def test_unterminated_utf8_event_is_available_and_marked_partial(self):
-        calls = []
-        text = '\ufeffdata: {"choices":[{"delta":{"reasoning_content":"未结束的思考"}}]}'
-        events = list(review.sse_events(response_for(text), on_event=lambda value, complete: calls.append((value, complete))))
-        self.assertEqual(json.loads(events[0])["choices"][0]["delta"]["reasoning_content"], "未结束的思考")
-        self.assertEqual(calls[-1][1], False)
-        self.assertNotIn("[DONE]", events)
-
-
-if __name__ == "__main__":
-    unittest.main()
+if __name__=="__main__":unittest.main()

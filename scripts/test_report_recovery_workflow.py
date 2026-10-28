@@ -7,8 +7,8 @@ import unittest
 from unittest.mock import patch
 
 import review
-import workflow
-from test_review import FakeResponse, FakeSession, FAKE_KEY, CONFIG
+import harness_records
+from test_review import RecordFixture, FAKE_KEY, CONFIG
 
 
 def issue(number):
@@ -26,18 +26,14 @@ class ReportRecoveryWorkflowTests(unittest.TestCase):
         self.output = self.root / "review"
 
     def run_response(self, text, status=200):
-        response = FakeResponse(body={"choices": [{"message": {"content": text}, "finish_reason": "stop"}],
-                                      "usage": {"prompt_tokens": 20, "completion_tokens": 40}}, status=status)
-        session = FakeSession(response)
-        with patch.object(review, "load_credential", return_value=FAKE_KEY), \
-                patch.object(review.requests, "Session", return_value=session):
-            result = workflow.run_workflow(
-                self.config, {"task": "Check return contract", "files": [{"path": "sample.py", "content": "value = 1\n"}]},
-                self.output, review_call=review.run_review,
-                route_selector=lambda config, at=None: review.select_route(config, "2026-10-27T12:00:00+08:00"))
-        self.assertEqual(len(session.calls), 1, "Local recovery must not request another model response")
-        self.assertEqual(result["model_calls"], 1)
-        self.assertEqual(result["content"], text.replace(FAKE_KEY, "[REDACTED]"))
+        fixture=RecordFixture(self.output)
+        fixture.begin()
+        wire="data: "+json.dumps({"choices":[{"delta":{"content":text},"finish_reason":"stop"}]})+"\n\ndata: [DONE]\n\n"
+        fixture.wire(wire)
+        fixture.end(text)
+        result=fixture.finish()
+        self.assertEqual(result["model_calls"],1)
+        self.assertEqual(result["content"],text.replace(FAKE_KEY,"[REDACTED]"))
         return result
 
     def test_bad_middle_element_preserves_all_ten_findings_and_pending_verdicts(self):
@@ -88,7 +84,7 @@ class ReportRecoveryWorkflowTests(unittest.TestCase):
 
     def test_unexpected_parser_error_does_not_skip_raw_call_persistence(self):
         raw = '{"findings":[]}'
-        with patch.object(review, "parse_report_text", side_effect=AttributeError("synthetic parser API error")):
+        with patch.object(harness_records, "parse_report_text", side_effect=AttributeError("synthetic parser API error")):
             self.run_response(raw)
         folder = self.output / "calls" / "0001-review"
         child = review.read_json(folder / "result.json")

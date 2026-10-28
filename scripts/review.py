@@ -19,8 +19,6 @@ if __name__ == "__main__":
     launch_in_runtime(__file__, require_tokenizer=True,
                       allow_install=review_allows_dependency_install(sys.argv[1:]))
 
-import requests
-
 import ledger
 from response_log import ResponseLog
 from bailian_catalog import load_catalog_cache, cache_lookup
@@ -32,12 +30,6 @@ from atomic_io import atomic_write_json, local_io_error_metadata, DEFAULT_REPLAC
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config.json"
 DEFAULT_OUTPUT_ROOT = DEFAULT_CONFIG.parent / "logs" / "reviews"
 
-
-
-class ProviderError(Exception):
-    def __init__(self, details):
-        self.details = details
-        super().__init__("Provider returned an error")
 
 
 class ConfigError(ValueError):
@@ -223,89 +215,6 @@ def parse_report(content):
     return value, findings
 
 
-def error_details(body, key):
-    source = body.get("error", body) if isinstance(body, dict) else body
-    if isinstance(source, dict):
-        details = {name: source[name] for name in ("code", "type", "message") if source.get(name) is not None}
-    else:
-        details = {"message": str(source)}
-    return {name: redact(str(value), key)[:2000] for name, value in details.items()}
-
-
-def _sse_lines(response):
-    """Split UTF-8 SSE lines without inventing blanks at a split CRLF.
-
-    Boundary handling follows the same invariant as the official CLI parser:
-    https://github.com/modelstudioai/cli/blob/main/packages/core/src/client/stream.ts
-    This state machine emits CR immediately and skips its optional following LF.
-    """
-    response.encoding = "utf-8"  # SSE is UTF-8, regardless of HTTP charset hints.
-    pending = []
-    after_cr = False
-    try:
-        for chunk in response.iter_content(chunk_size=512, decode_unicode=True):
-            if not chunk:
-                continue
-            if after_cr and chunk.startswith("\n"):
-                chunk = chunk[1:]
-            after_cr = False
-            start = 0
-            for ending in re.finditer(r"\r\n|\r|\n", chunk):
-                pending.append(chunk[start:ending.start()])
-                yield "".join(pending)
-                pending = []
-                start = ending.end()
-            if start < len(chunk):
-                pending.append(chunk[start:])
-            after_cr = chunk.endswith("\r")
-    except (Exception, KeyboardInterrupt):
-        # Keep already received partial lines available to the response logger
-        # before propagating a transport failure or user interruption.
-        if pending:
-            yield "".join(pending)
-        raise
-    if pending:
-        yield "".join(pending)
-
-
-def sse_events(response, on_line=None, on_event=None):
-    """Handle comments and multi-line SSE data, optionally logging each line first."""
-    data = []
-    event_lines = []
-    for line in _sse_lines(response):
-        if on_line is not None:
-            on_line(line)
-        event_lines.append(line)
-        line = line.lstrip("\ufeff")
-        if not line:
-            event = "\n".join(data) if data else None
-            if on_event is not None:
-                on_event(event, True)
-            event_lines = []
-            if data:
-                yield event
-                data = []
-        elif line.startswith("data:"):
-            value = line[5:]
-            data.append(value[1:] if value.startswith(" ") else value)
-    if data:
-        event = "\n".join(data)
-        if on_event is not None:
-            on_event(event, False)
-        yield event
-    elif event_lines and on_event is not None:
-        on_event(None, False)
-
-
-def text_content(value):
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return "".join(item.get("text", "") for item in value
-                       if isinstance(item, dict) and item.get("type") in ("text", "output_text") and isinstance(item.get("text"), str))
-    return ""
-
-
 def write_report(output_dir, result, key):
     content = result.get("content", "")
     metadata = {name: result.get(name) for name in (
@@ -341,257 +250,23 @@ def ledger_metadata(result, task, key, output_dir):
     }, key)
 
 
-def run_review(config, packet, output_dir, dry_run=False, at=None, task_label=None, chat_messages=None, tools=None, route_override=None, token_budget=None, progress_callback=None):
-    if at is not None and not dry_run:
-        raise ValueError("--at is available only for offline routing or dry-run")
-    url = config_url(config)
-    route = dict(route_override) if route_override is not None else select_route(config, at)
-    payload = make_payload(packet, route, chat_messages=chat_messages, tools=tools)
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=False)
-    result = {
-        "route": route, "requested_model": route["model"], "reported_model": None,
-        "runtime": __import__("skill_runtime").runtime_info(),
-        "started_utc": datetime.now(timezone.utc).isoformat(), "status": "dry_run" if dry_run else "requesting",
-        "http_status": None, "finish_reason": None, "stream_done": False,
-        "content": "", "parsed_report": None, "parsed_findings": None, "parse_ok": False,
-        "usage": {}, "usage_missing": True, "reasoning_chars": 0,
-        "first_event_seconds": None, "first_content_seconds": None,
-        "response_log_files": [],
-        "tool_calls": [],
-    }
-    if token_budget is not None:
-        result["token_budget"] = token_budget
-    started = time.perf_counter()
-    key = None
-    session = None
-    response_log = None
-    last_progress = -10.0
-    visible_parts = []
-    visible_chars = 0
-    call_id = None
-    tool_parts = {}
-    label = task_title(task_label, packet.get("task"))
-    label = label or (output_dir.parent.name + " / " + output_dir.name)
+def run_review(config, packet, output_dir, dry_run=False, at=None, task_label=None,
+               chat_messages=None, tools=None, route_override=None, token_budget=None,
+               progress_callback=None):
+    """One compatibility request through the maintained official protocol adapter.
 
-    def record_call(final=False):
-        nonlocal call_id
-        if dry_run:
-            return
-        try:
-            # A failed credential load never persists a supplied title that could contain the unavailable key.
-            metadata = ledger_metadata(result, label if key else "审阅准备失败", key, output_dir)
-            if final:
-                ledger.finish_call(ledger_path(config), call_id, metadata)
-            else:
-                call_id = ledger.start_call(ledger_path(config), metadata)
-                result["ledger_id"] = call_id
-        except Exception as exc:
-            result["ledger_warning"] = "Local call ledger write failed (" + type(exc).__name__ + "); review continued."
-
-    def progress(state, force=False):
-        nonlocal last_progress
-        seconds = time.perf_counter() - started
-        if not force and seconds - last_progress < 10:
-            return
-        last_progress = seconds
-        try:
-            write_json(output_dir / "progress.json", {
-                "state": state, "route": route, "seconds": seconds,
-                "visible_chars": visible_chars, "reasoning_chars": result["reasoning_chars"],
-                "first_event_seconds": result["first_event_seconds"], "first_content_seconds": result["first_content_seconds"],
-                "updated_utc": datetime.now(timezone.utc).isoformat(),
-            }, key, replace_retry_seconds=0, preserve_on_error=False)
-        except OSError as exc:
-            # Progress is advisory. A Windows reader can temporarily prevent
-            # atomic replacement; never interrupt or replay the live request
-            # because its progress sidecar could not be updated.
-            result["progress_warning"] = (
-                "Progress metadata write failed (" + type(exc).__name__ + "); "
-                "the request and response capture continued."
-            )
-        if progress_callback is not None:
-            try:
-                progress_callback(redact({"state": state, "call": output_dir.name,
-                                          "visible_chars": visible_chars, "reasoning_chars": result["reasoning_chars"]}, key))
-            except Exception:
-                result.setdefault("progress_warning", "CLI progress output unavailable; review records are preserved")
-
-    def consume(body, streaming):
-        nonlocal visible_chars
-        if not isinstance(body, dict):
-            raise ValueError("Provider response must be a JSON object")
-        if result["first_event_seconds"] is None:
-            result["first_event_seconds"] = time.perf_counter() - started
-        if body.get("error"):
-            raise ProviderError(error_details(body, key))
-        if body.get("model"):
-            result["reported_model"] = body["model"]
-        if isinstance(body.get("usage"), dict) and body["usage"]:
-            result["usage"] = body["usage"]
-        for choice in body.get("choices") or []:
-            if choice.get("index", 0) != 0:
-                continue
-            message = choice.get("delta" if streaming else "message") or {}
-            visible = text_content(message.get("content"))
-            if visible:
-                if result["first_content_seconds"] is None:
-                    result["first_content_seconds"] = time.perf_counter() - started
-                visible_parts.append(visible)
-                visible_chars += len(visible)
-            for reasoning_name in ("reasoning_content", "reasoning"):
-                reasoning = message.get(reasoning_name)
-                if isinstance(reasoning, str) and reasoning:
-                    result["reasoning_chars"] += len(reasoning)
-                    if response_log is not None:
-                        response_log.record_reasoning(reasoning)
-            for position, call in enumerate(message.get("tool_calls") or []):
-                index = call.get("index", position)
-                current = tool_parts.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
-                if call.get("id"):
-                    current["id"] = call["id"]
-                function = call.get("function") or {}
-                for field in ("name", "arguments"):
-                    piece = function.get(field)
-                    if isinstance(piece, str):
-                        current["function"][field] += piece
-            if choice.get("finish_reason") is not None:
-                result["finish_reason"] = choice["finish_reason"]
-        progress("streaming" if streaming else "received")
-
+    New review tasks use the official Harness loop through run_harness_workflow.
+    This entry remains one recorded request, without hidden retries or tool execution.
+    """
     try:
-        if not dry_run:
-            key = load_credential(config)
-            payload = redact(payload, key)
-            response_log = ResponseLog(output_dir, key)
-            result["response_log_files"] = response_log.files
-            record_call()
-        if token_budget is not None:
-            write_json(output_dir / "token_budget.json", token_budget, key)
-        write_json(output_dir / "request.json", {"url": url, "route": route, "payload": payload}, key)
-        progress(result["status"], force=True)
-        if not dry_run:
-            session = requests.Session()
-            session.trust_env = False
-            with session.post(url, headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
-                              json=payload, stream=True, allow_redirects=False,
-                              timeout=(float(config["connect_timeout_seconds"]), float(config["read_timeout_seconds"]))) as response:
-                result["http_status"] = response.status_code
-                if response_log is not None:
-                    response_log.record_http_metadata(response.status_code, response.headers)
-                if not 200 <= response.status_code < 300:
-                    body_bytes = response.content
-                    if response_log is not None:
-                        response_log.record_response_body(body_bytes)
-                        result["response_log_files"] = response_log.files
-                    if 300 <= response.status_code < 400:
-                        raise ProviderError({"code": "redirect_rejected", "message": "Redirect response rejected; no follow-up request was sent"})
-                    try:
-                        body = response.json()
-                    except ValueError:
-                        body = response.text
-                    raise ProviderError(error_details(body, key))
-                response.encoding = "utf-8"
-                if "text/event-stream" in response.headers.get("Content-Type", "").lower():
-                    for event in sse_events(
-                        response,
-                        on_line=response_log.record_sse_line if response_log else None,
-                        on_event=response_log.record_sse_event if response_log else None,
-                    ):
-                        if event.strip() == "[DONE]":
-                            result["stream_done"] = True
-                            break
-                        consume(json.loads(event), streaming=True)
-                else:
-                    body_bytes = response.content
-                    if response_log is not None:
-                        response_log.record_response_body(body_bytes)
-                        result["response_log_files"] = response_log.files
-                    consume(response.json(), streaming=False)
-                    result["stream_done"] = True
-                finish = result["finish_reason"]
-                if finish is None and result["stream_done"]:
-                    result["completion_warning"] = "No finish_reason received; completion is based only on the response ending. Review completeness from the visible report."
-                if finish == "tool_calls" and tools and tool_parts:
-                    result["status"] = "tool_calls"
-                elif finish in ("length", "content_filter", "tool_calls", "function_call", "aborted", "insufficient_system_resource"):
-                    result["status"] = "incomplete"
-                elif result["stream_done"] or finish in ("stop", "end_turn", "eos"):
-                    result["status"] = "completed"
-                else:
-                    result["status"] = "incomplete"
-    except ProviderError as exc:
-        result.update(status="error", error_type="ProviderError", provider_error=exc.details)
-    except requests.RequestException as exc:
-        # Preserve the concrete exception name for diagnosis, but classify by
-        # Requests' base types so application subclasses keep their semantics.
-        if isinstance(exc, requests.exceptions.SSLError):
-            category = "tls"
-        elif isinstance(exc, requests.Timeout):
-            category = "timeout"
-        elif isinstance(exc, requests.ConnectionError):
-            category = "connection"
-        elif isinstance(exc, (requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError)):
-            category = "stream"
-        else:
-            category = "other"
-        result.update(status="error", error_type=type(exc).__name__, transport_error_category=category,
-                      error_message="Transport request failed; this attempt did not retry")
-    except ConfigError as exc:
-        result.update(status="error", error_type="ConfigError", error_message=str(exc))
-    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
-        result.update(status="error", error_type=type(exc).__name__, error_message="Credential, local I/O, or response format error; no automatic retry was made")
-        io_details = local_io_error_metadata(exc)
-        if io_details is not None:
-            result["local_io_error"] = io_details
-    except KeyboardInterrupt:
-        result.update(status="interrupted", error_type="KeyboardInterrupt", error_message="Interrupted by the operator; partial visible output is preserved")
-    finally:
-        if response_log is not None:
-            response_log.close()
-            result["response_log_files"] = response_log.files
-            if response_log.warning:
-                result["response_log_warning"] = response_log.warning
-        if session is not None:
-            session.close()
-        result["content"] = "".join(visible_parts)
-        result["tool_calls"] = [tool_parts[index] for index in sorted(tool_parts)]
-        result["seconds"] = time.perf_counter() - started
-        result["ended_utc"] = datetime.now(timezone.utc).isoformat()
-        result["usage_missing"] = not bool(result["usage"])
-        if not dry_run and result["status"] != "tool_calls":
-            try:
-                parsed = parse_report_text(result["content"])
-                result["report_parse_status"] = parsed["parse_status"]
-                result["raw_parse_ok"] = parsed["parse_status"] == "valid"
-                result["report_recovery"] = {
-                    name: parsed[name] for name in ("repair", "repair_log", "raw_parse_error", "counts", "possible_loss", "warnings",
-                                  "candidates", "unverified_candidates", "unreadable_candidates", "recovery_integrity")
-                    if name in parsed
-                }
-                value = parsed.get("recovered_report")
-                findings = value if isinstance(value, list) else value.get("findings") if isinstance(value, dict) else None
-                if isinstance(findings, list):
-                    result["parsed_report"], result["parsed_findings"] = value, findings
-                    result["parse_ok"] = not parsed.get("possible_loss") and all(isinstance(item, dict) for item in findings)
-                if not result["parse_ok"]:
-                    result["parse_warning"] = "Report is incomplete or ambiguous; available local recovery and original text are preserved for host adjudication"
-                elif parsed["parse_status"] != "valid":
-                    result["parse_warning"] = "Report formatting was recovered locally; original text and repair diagnostics are preserved"
-            except Exception as exc:
-                # Reporting failures must never skip persistence of the raw call.
-                result.update(parse_ok=False, raw_parse_ok=False, report_parse_status="invalid",
-                              parsed_report=None, parsed_findings=None,
-                              report_recovery={"error": type(exc).__name__, "possible_loss": True},
-                              parse_warning="Local report parsing failed; the original response is preserved for host review")
-        # Persist a final-only progress warning in the authoritative result
-        # and report too. The CLI's finished summary still follows this return.
-        progress(result["status"], force=True)
-        result = redact(result, key)
-        record_call(final=True)
-        write_json(output_dir / "result.json", result, key)
-        write_report(output_dir, result, key)
-    return result
+        from .harness_runner import run_single_request
+    except ImportError:
+        from harness_runner import run_single_request
+    return run_single_request(
+        config, packet, output_dir, dry_run=dry_run, at=at, task_label=task_label,
+        chat_messages=chat_messages, tools=tools, route_override=route_override,
+        token_budget=token_budget, progress_callback=progress_callback,
+    )
 
 
 def main(argv=None):
@@ -679,7 +354,7 @@ def main(argv=None):
             credential_path = config.get("credential_file")
             if isinstance(credential_path, str):
                 excluded.append(Path(credential_path).expanduser().resolve())
-            from workflow import _positive_limit
+            from harness_records import _positive_limit
             packet = {}
             def source_factory(root):
                 return RepositorySource(
@@ -693,7 +368,7 @@ def main(argv=None):
                 )
         else:
             packet = redact(read_json(args.packet), active_key)
-        from workflow import run_workflow
+        from harness_runner import run_harness_workflow
         options = {"source_factory": source_factory} if source_factory is not None else {}
         if resume_state is not None:
             options["resume_state"] = resume_state
@@ -701,12 +376,10 @@ def main(argv=None):
         if not args.dry_run and not args.quiet_progress:
             from review_progress import ReviewProgress
             progress_reporter = ReviewProgress()
-        def review_with_progress(config, packet, directory, **kwargs):
-            return run_review(config, packet, directory, progress_callback=progress_reporter, **kwargs)
-        result = run_workflow(
-            config, packet, args.output_dir, review_call=review_with_progress,
-            route_selector=select_route, task_label=task_label,
-            dry_run=args.dry_run, at=args.at, **options,
+        result = run_harness_workflow(
+            config, packet, args.output_dir, route_selector=select_route,
+            task_label=task_label, dry_run=args.dry_run, at=args.at,
+            progress_callback=progress_reporter, **options,
         )
         if progress_reporter is not None:
             progress_reporter.finish(result)

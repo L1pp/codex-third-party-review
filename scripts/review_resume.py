@@ -11,15 +11,15 @@ from pathlib import Path, PurePosixPath
 import re
 
 try:
-    from .api_recovery import classify_failure
     from .atomic_io import atomic_write_json
+    from .harness_records import has_generation_progress, _positive_limit
     from .materials import MaterialStore
     from .repository_source import (RepositorySource, RepositoryError, _run_git,
                                     _private_name, _SKIP_DIRS, _PRIVATE_ROOT_DIRS,
                                     MAX_FILE_BYTES)
 except ImportError:
-    from api_recovery import classify_failure
     from atomic_io import atomic_write_json
+    from harness_records import has_generation_progress, _positive_limit
     from materials import MaterialStore
     from repository_source import (RepositorySource, RepositoryError, _run_git,
                                    _private_name, _SKIP_DIRS, _PRIVATE_ROOT_DIRS,
@@ -48,6 +48,37 @@ def _inside(path, parent):
         return True
     except ValueError:
         return False
+
+
+def _node_session_directory(root):
+    """Recognize safe durable-session files; Node validates schema and writers.
+
+    File presence is only a recovery candidate, not evidence that a process
+    stopped. In particular, this loader never probes or signals a recorded PID.
+    """
+    engine = root / "engine-session"
+    header, events = engine / "session-header.json", engine / "session.jsonl"
+    if not header.is_file() or not events.is_file():
+        return None
+    resolved = engine.resolve()
+    if (not _inside(resolved, root) or not _inside(header.resolve(), resolved)
+            or not _inside(events.resolve(), resolved)):
+        raise ResumeError("The recorded engine session escapes its review directory")
+    return resolved
+
+
+def _reasoning_log(call_dir):
+    path = call_dir / "reasoning.txt"
+    if not path.exists():
+        return ""
+    if not _inside(path.resolve(), call_dir):
+        raise ResumeError("The recorded reasoning file escapes its request directory")
+    try:
+        # A crash may interrupt a physical UTF-8 write. Keep available text and
+        # leave the untouched bytes available in the original local log.
+        return path.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        raise ResumeError("The recorded reasoning file is unreadable") from None
 
 
 def _capture_path(root, entry):
@@ -103,6 +134,7 @@ class ResumeState:
     endpoint: str
     manifest: dict | None = None
     captures: list = field(default_factory=list)
+    crash_recovery_candidate: bool = False
 
     def validate_output(self, output_dir):
         """Resolve a separate destination without creating or changing files."""
@@ -116,10 +148,6 @@ class ResumeState:
         """Return the workflow's ordinary ``new_root -> source`` factory."""
         # Use the ordinary workflow's legacy normalization for optional tool
         # sizes too (None -> default, numeric strings -> int, zero -> one).
-        try:
-            from .workflow import _positive_limit
-        except ImportError:
-            from workflow import _positive_limit
         limits = {"max_chars": _positive_limit(config, "tool_max_chars", 24000),
                   "max_lines": _positive_limit(config, "tool_max_lines", 250)}
         def create(root):
@@ -146,7 +174,8 @@ def _review_call_directory(root, call):
         raise ResumeError("A recorded review request directory is invalid")
     call_dir = Path(raw_directory).resolve()
     if (call_dir.parent != root / "calls"
-            or not re.fullmatch(r"[0-9]{4,}-review", call_dir.name)):
+            or not re.fullmatch(r"[0-9]{4,}-(?:review|compaction(?:-[A-Za-z0-9_]+)*)", call_dir.name)
+            or not call_dir.is_dir()):
         raise ResumeError("A recorded review request is outside the selected run")
     return call_dir
 
@@ -177,19 +206,9 @@ def _confirmed_inline_ranges(root, flow, children):
         if not delivered:
             result_path = call_dir / "result.json"
             raw = _json(result_path, call_dir) if result_path.exists() else {}
-            reasoning_path = call_dir / "reasoning.txt"
-            if reasoning_path.exists():
-                if not _inside(reasoning_path.resolve(), call_dir):
-                    raise ResumeError("A recorded reasoning file escapes its request directory")
-                try:
-                    with reasoning_path.open(encoding="utf-8") as handle:
-                        reasoning = handle.read(1)
-                except (OSError, UnicodeError):
-                    raise ResumeError("A recorded reasoning file is unreadable") from None
-            else:
-                reasoning = None
+            reasoning = _reasoning_log(call_dir)[:1]
             delivered = (raw.get("status") in {"completed", "tool_calls"}
-                         or classify_failure(raw, reasoning_text=reasoning)["has_progress"])
+                         or has_generation_progress(raw, reasoning_text=reasoning))
         if delivered:
             for scope in ranges:
                 if scope not in confirmed:
@@ -209,7 +228,10 @@ def load_resume(review_dir):
     if not root.is_dir():
         raise ResumeError("The prior review directory is unavailable")
     flow = _json(root / "workflow.json", root)
-    if flow.get("status") not in {"error", "interrupted", "incomplete"}:
+    engine_directory = _node_session_directory(root)
+    active_status = flow.get("status") in {"running", "preparing", "requesting"}
+    if (flow.get("status") not in {"error", "interrupted", "incomplete"}
+            and not (active_status and engine_directory is not None)):
         raise ResumeError("Only an ended, unfinished review can be resumed")
     packet = _json(root / "materials.json", root)
     children = flow.get("child_calls")
@@ -217,16 +239,44 @@ def load_resume(review_dir):
         raise ResumeError("Recorded review calls must be an array")
     candidates = [c for c in children
                   if isinstance(c, dict) and c.get("stage") == "review"]
+    compaction_only = False
+    if not candidates and engine_directory is not None:
+        candidates = [c for c in children if isinstance(c, dict)
+                      and (c.get("stage") == "compaction"
+                           or (isinstance(c.get("stage"), str) and c["stage"].startswith("compaction-")))]
+        compaction_only = bool(candidates)
     if not candidates:
         raise ResumeError("No recorded review request is available to resume")
     call = candidates[-1]
     call_dir = _review_call_directory(root, call)
     request = _json(call_dir / "request.json", call_dir)
-    result = _json(call_dir / "result.json", call_dir)
-    reasoning_path = call_dir / "reasoning.txt"
-    if reasoning_path.exists() and not _inside(reasoning_path.resolve(), call_dir):
-        raise ResumeError("The recorded reasoning file escapes its request directory")
-    route, endpoint = request.get("route"), request.get("url")
+    result_path = call_dir / "result.json"
+    result_missing = not result_path.exists()
+    if result_missing and engine_directory is not None:
+        reasoning = _reasoning_log(call_dir)
+        result = {
+            "status": "interrupted", "error_type": "ProcessInterrupted",
+            "error_message": "The recorded request has no finalized result; session recovery remains unconfirmed.",
+            "content": "", "content_is_partial": True,
+            "usage": {}, "usage_missing": True,
+            "parse_ok": False, "parsed_report": None, "parsed_findings": None,
+            "reasoning_text": reasoning, "reasoning_chars": len(reasoning),
+            "finish_reason": None, "stream_done": False,
+            "tool_calls": [], "crash_recovery_candidate": True,
+        }
+    else:
+        result = _json(result_path, call_dir)
+        reasoning_path = call_dir / "reasoning.txt"
+        if reasoning_path.exists() and not _inside(reasoning_path.resolve(), call_dir):
+            raise ResumeError("The recorded reasoning file escapes its request directory")
+    crash_candidate = engine_directory is not None and (active_status or result_missing)
+    # Summary requests deliberately use a different effort/output allowance.
+    # A native session always prefers its recorded full task route, and a
+    # compaction-only record must never fall back to the summary allowance.
+    route = flow.get("route") if engine_directory is not None else None
+    if route is None and not compaction_only:
+        route = request.get("route")
+    endpoint = request.get("url")
     if (not isinstance(route, dict) or not isinstance(route.get("model"), str)
             or not route["model"].strip()):
         raise ResumeError("The recorded request has no usable fixed model route")
@@ -236,6 +286,16 @@ def load_resume(review_dir):
     messages = payload.get("messages") if isinstance(payload, dict) else None
     if not isinstance(messages, list) or not messages or any(not isinstance(m, dict) for m in messages):
         raise ResumeError("The last review request has no usable message history")
+    if compaction_only:
+        # The native session retains the original task/progress. A partial or
+        # failed summary is not a review finding or a completed review report.
+        # Keep its raw request/result/reasoning only in the untouched old run.
+        messages = []
+        result = dict(result, source_stage=call.get("stage"), content="", reasoning_text="",
+                      parse_ok=False, parsed_report=None, parsed_findings=None, tool_calls=[],
+                      content_is_partial=True)
+        if result.get("status") not in {"error", "interrupted", "incomplete"}:
+            result["status"] = "incomplete"
     coverage = flow.get("coverage") or {}
     if not isinstance(coverage, dict):
         raise ResumeError("Recorded material delivery coverage is invalid")
@@ -305,10 +365,13 @@ def load_resume(review_dir):
         "source_review_directory": str(root),
         "source_review_status": flow.get("status"),
         "source_call_directory": str(call_dir),
+        "source_call_stage": call.get("stage"),
+        "review_progress_available": not compaction_only,
         "restored_source_count": len(captures),
         "old_calls_replayed": 0,
         "old_tool_calls_reexecuted": 0,
         "old_usage_in_new_call_totals": False,
+        "crash_recovery_candidate": crash_candidate,
         "inline_delivery_reconstruction": {
             "confirmed_ranges": len(inline_ranges),
             "unconfirmed_attempt_range_entries": unconfirmed_inline_entries,
@@ -319,7 +382,7 @@ def load_resume(review_dir):
     }
     return ResumeState(root, packet, messages, result, call_dir,
                        read_sources, inline_ranges, checkpoint, provenance,
-                       route, endpoint, manifest, captures)
+                       route, endpoint, manifest, captures, crash_candidate)
 
 
 class ResumedRepositorySource(RepositorySource):
