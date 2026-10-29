@@ -19,13 +19,15 @@ try:
                                   _positive_limit, _save_outputs, _write_json, enrich_report, redact)
     from .materials import MaterialStore
     from .response_log import StreamingRedactor
-    from .review_contract import SYSTEM_PROMPT, task_title
+    from .review_contract import task_title, review_system_prompt
+    from .review_policy import review_policy, resume_elapsed
 except ImportError:
     from harness_records import (RuntimeRecords, _as_text, _dump, _messages_for_review,
                                  _positive_limit, _save_outputs, _write_json, enrich_report, redact)
     from materials import MaterialStore
     from response_log import StreamingRedactor
-    from review_contract import SYSTEM_PROMPT, task_title
+    from review_contract import task_title, review_system_prompt
+    from review_policy import review_policy, resume_elapsed
 
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
@@ -81,6 +83,7 @@ def _material_context(store, config, route):
         tools = store.tools() if exploration or bundle.get("needs_tools") else []
         messages = _messages_for_review(bundle["task_context"], index,
                                         inline_materials=bundle.get("materials"), exploration=exploration)
+        messages[0]["content"] = review_system_prompt(review_policy(config)["profile"])
         if input_cap is None:
             return bundle, tools, messages
         try:
@@ -148,7 +151,8 @@ def _native_session_pair(state):
 def build_engine_spec(config, root, route, messages, tools, resume_state=None):
     session_id = "review-" + str(uuid.uuid4())
     spec = {"sessionId": session_id, "outputDir": str(Path(root).resolve()), "provider": "review",
-            "route": route, "systemPrompt": SYSTEM_PROMPT,
+            "route": route, "systemPrompt": review_system_prompt(review_policy(config)["profile"]),
+            "reviewPolicy": review_policy(config),
             "initialUserContent": messages[-1]["content"], "tools": tools,
             "contextManagement": config.get("context_management") or {},
             "apiRecovery": config.get("api_recovery") or {},
@@ -157,6 +161,7 @@ def build_engine_spec(config, root, route, messages, tools, resume_state=None):
             "tokenizerDir": str(SKILL_ROOT / "assets" / "deepseek_v4_tokenizer"),
             "tokenizerDirectory": str(SKILL_ROOT / "assets" / "deepseek_v4_tokenizer")}
     if resume_state is not None:
+        spec["reviewPolicy"]["resume_elapsed_seconds"] = resume_elapsed(resume_state.directory)
         previous_engine = resume_state.directory / "engine-session"
         header_path = previous_engine / "session-header.json"
         if _native_session_pair(resume_state):
@@ -326,6 +331,8 @@ def _run_bridge(spec, secret, records, store, config, *, method="run", payload=N
         elif event == "recovery.stopped":
             records.workflow["recovery_events"].append(records.safe(data))
             records.save_flow()
+        elif event == "review.timing":
+            records.record_timing(data)
         elif event == "session.event":
             records.workflow["engine_event_count"] = records.workflow.get("engine_event_count", 0) + 1
         elif event == "runtime.preflight_error":
@@ -408,6 +415,7 @@ def run_harness_workflow(config, packet, output_dir, *, route_selector,
     try:
         route = dict(resume_state.route) if resume_state is not None else route_selector(config, at if dry_run else None)
         workflow["route"] = route
+        workflow["review_policy"] = review_policy(config)
         endpoint = module.config_url(config)
         key = None if dry_run else module.load_credential(config)
         packet = redact(packet, key)
@@ -454,11 +462,15 @@ def run_harness_workflow(config, packet, output_dir, *, route_selector,
         spec = redact(build_engine_spec(config, root, route, messages, tools, resume_state), key)
         ready = _ensure_runtime(config)
         runtime_config = dict(config, node_executable=ready["executable"])
+        spec["reviewPolicy"]["initial_elapsed_seconds"] = max(0, time.perf_counter() - workflow["_started_monotonic"])
+        spec["reviewPolicy"]["started_utc"] = workflow["started_utc"]
         engine = redact(_run_bridge(spec, {"apiKey": key, "endpoint": endpoint}, records, store, runtime_config), key)
         workflow["engine"] = {"name": "DeepSeek Harness", "version": "0.2.1-rc.2", "sessionId": engine.get("sessionId", spec["sessionId"]),
                               "sessionDirectory": engine.get("sessionDirectory", str((root / "engine-session").resolve())),
                               "finishReason": engine.get("finishReason"), "stats": engine.get("stats"),
                               "error_type": engine.get("error_type"), "error_message": engine.get("error_message")}
+        if isinstance(engine.get("reviewTiming"), dict):
+            workflow["review_timing"] = engine["reviewTiming"]
         workflow["retry_wait_seconds"] = engine.get("retryWaitSeconds", 0) or 0
         status = engine.get("status")
         workflow["status"] = "completed" if status == "completed" else "error" if status == "error" else "incomplete"

@@ -23,6 +23,32 @@ const nonnegative = (value, name) => {
   return value;
 };
 
+// Added tokens are hard tokenizer boundaries, so their surrounding sections
+// can be encoded independently without approximating cross-boundary BPE. Keep
+// this fast path narrower than the supported asset formats: unfamiliar token
+// normalization/whitespace rules fall back to the unchanged complete encoder.
+function nativeSectionPatterns(definition, config) {
+  const added = definition.added_tokens;
+  const normalizer = definition.normalizer;
+  const isolated = value => value?.type === 'Split' || value?.type === 'ByteLevel' && value.add_prefix_space === false
+    || value?.type === 'Sequence' && Array.isArray(value.pretokenizers) && value.pretokenizers.every(isolated);
+  if (!Array.isArray(added) || !added.length || config.remove_space || config.do_lowercase_and_remove_accent
+    || normalizer && !(normalizer.type === 'Sequence' && normalizer.normalizers?.length === 0)
+    || !isolated(definition.pre_tokenizer) || definition.post_processor?.type !== 'ByteLevel'
+    || definition.model?.type !== 'BPE' || definition.model.dropout != null && definition.model.dropout !== 0
+    || added.some(token => typeof token.content !== 'string' || !token.content || typeof token.normalized !== 'boolean'
+      || token.single_word !== false || token.lstrip !== false || token.rstrip !== false)) return null;
+  // The maintained tokenizer isolates raw added tokens first, then normalized
+  // ones. Preserve that two-stage priority even for overlapping marker names;
+  // the guarded identity normalizer makes both stages exact literal matches.
+  const pattern = normalized => {
+    const literals = [...new Set(added.filter(token => token.normalized === normalized).map(token => token.content))]
+      .sort((a, b) => b.length - a.length).map(text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    return literals.length ? new RegExp(literals.join('|'), 'g') : null;
+  };
+  return { raw: pattern(false), normalized: pattern(true) };
+}
+
 /** The same native tokenizer/template estimate as the material host; never a second budget policy. */
 export class PayloadTokenCounter {
   constructor(route, tokenizerDirectory = new URL('../assets/deepseek_v4_tokenizer/', import.meta.url)) {
@@ -31,11 +57,52 @@ export class PayloadTokenCounter {
     if (!this.native) return;
     const directory = tokenizerDirectory instanceof URL ? tokenizerDirectory : pathToFileURL(resolve(tokenizerDirectory) + sep);
     const config = JSON.parse(readFileSync(new URL('tokenizer_config.json', directory), 'utf8'));
-    this.tokenizer = new Tokenizer(JSON.parse(readFileSync(new URL('tokenizer.json', directory), 'utf8')), config);
+    const definition = JSON.parse(readFileSync(new URL('tokenizer.json', directory), 'utf8'));
+    this.tokenizer = new Tokenizer(definition, config);
+    this.sectionPatterns = nativeSectionPatterns(definition, config);
+    this.textCache = new Map();
+    this.cachedTextChars = 0;
+    // A cache eviction only repeats exact encoding; it never changes counts.
+    this.maxCachedTextChars = 8_000_000;
+    this.maxCachedTextItems = 4096;
     this.template = new Template(config.chat_template);
     this.bos = typeof config.bos_token === 'string' ? config.bos_token : config.bos_token?.content || '';
   }
-  text(text) { return this.tokenizer.encode(text, { add_special_tokens: false }).ids.length; }
+  encodeText(text) {
+    if (!text) return 0;
+    if (this.textCache.has(text)) {
+      const tokens = this.textCache.get(text);
+      this.textCache.delete(text);
+      this.textCache.set(text, tokens);
+      return tokens;
+    }
+    const tokens = this.tokenizer.encode(text, { add_special_tokens: false }).ids.length;
+    if (text.length <= this.maxCachedTextChars && this.maxCachedTextItems > 0) {
+      while (this.textCache.size && (this.cachedTextChars + text.length > this.maxCachedTextChars
+        || this.textCache.size >= this.maxCachedTextItems)) {
+        const oldest = this.textCache.keys().next().value;
+        this.textCache.delete(oldest);
+        this.cachedTextChars -= oldest.length;
+      }
+      this.textCache.set(text, tokens);
+      this.cachedTextChars += text.length;
+    }
+    return tokens;
+  }
+  sectionTokens(text, pattern, encode) {
+    if (!pattern) return encode(text);
+    let tokens = 0, cursor = 0;
+    for (const match of text.matchAll(pattern)) {
+      tokens += encode(text.slice(cursor, match.index)) + 1;
+      cursor = match.index + match[0].length;
+    }
+    return tokens + encode(text.slice(cursor));
+  }
+  text(text) {
+    if (!this.sectionPatterns) return this.encodeText(text);
+    const normalized = value => this.sectionTokens(value, this.sectionPatterns.normalized, section => this.encodeText(section));
+    return this.sectionTokens(text, this.sectionPatterns.raw, normalized);
+  }
   count(payload) {
     const messages = payload.messages || [], tools = payload.tools || [];
     if (!this.native) return messages.reduce((n, item) => n + Buffer.byteLength(JSON.stringify(item)), 0)

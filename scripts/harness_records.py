@@ -32,6 +32,12 @@ def _json_default(value):
 def _write_json(path, value):
     atomic_write_json(path, value, default=_json_default)
 
+def _append_jsonl(path, value):
+    """Append one complete local observation without rewriting earlier records."""
+    with Path(path).open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(_dump(value) + "\n")
+
+
 def _dump(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=_json_default)
 
@@ -85,6 +91,11 @@ def _scope_only(arguments):
     if not isinstance(arguments, dict):
         return {}
     scope = {key: arguments[key] for key in allowed if key in arguments}
+    if isinstance(arguments.get("requests"), list):
+        scope["requests"] = [
+            {"tool": item.get("tool"), "scope": _scope_only(item.get("arguments"))}
+            for item in arguments["requests"] if isinstance(item, dict)
+        ]
     if "query" in arguments and isinstance(arguments["query"], str):
         scope["query_chars"] = len(arguments["query"])
     return scope
@@ -161,7 +172,9 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
             "ranges": call.get("inline_material_ranges", []),
             "estimated_tokens": call.get("inline_estimated_tokens"),
             "method": call.get("inline_estimate_method"),
-            "overflow_materials": call.get("inline_overflow_materials", []),
+            **({"overflow_materials_file": call["inline_overflow_materials_file"]}
+               if "inline_overflow_materials_file" in call else
+               {"overflow_materials": call.get("inline_overflow_materials", [])}),
         }
         for call in workflow.get("child_calls", [])
         if "inline_estimated_tokens" in call
@@ -174,9 +187,10 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
         "read_sources": read_sources,
         "inline_delivery_requests": inline_requests,
         "inline_delivered_ranges": workflow.get("confirmed_inline_ranges", inline_ranges),
-        "overflow_materials_at_last_review": (
-            inline_requests[-1]["overflow_materials"] if inline_requests else []
-        ),
+        **({"overflow_materials_at_last_review_file": workflow["material_delivery_index_file"],
+            "overflow_materials_at_last_review_count": workflow.get("inline_overflow_materials_count", 0)}
+           if workflow.get("material_delivery_index_file") else
+           {"overflow_materials_at_last_review": inline_requests[-1].get("overflow_materials", []) if inline_requests else []}),
         "tool_delivered_ranges": read_sources,
         "status": "not_verified_by_workflow",
         "coverage_gap": (
@@ -243,38 +257,44 @@ def _save_outputs(root, workflow, final_result, material_count, tool_trace, read
         "resume": workflow.get("resume"),
         "recovery_events": workflow.get("recovery_events", []),
         "timing": workflow.get("timing"),
+        "record_format_version": workflow.get("record_format_version", 1),
+        "call_history_file": workflow.get("call_history_file"),
+        "material_delivery_index_file": workflow.get("material_delivery_index_file"),
+        "tool_metrics": workflow.get("tool_metrics", {}),
+        "review_timing": workflow.get("review_timing"),
+        "review_policy": workflow.get("review_policy"),
+        "review_timing_file": workflow.get("review_timing_file"),
+        "review_timing_warning": workflow.get("review_timing_warning"),
+        "record_metadata_warning": workflow.get("record_metadata_warning"),
     }
     _write_json(root / "result.json", result)
+    # Keep the human report small. Full per-request/delivery facts remain in
+    # workflow/result and the unmodified raw audit files, not copied into Markdown.
     meta = {
-        "status": result["status"],
-        "workflow_status": result["workflow_status"],
-        "route": result["route"],
-        "seconds": result["seconds"],
-        "child_calls": result["child_calls"],
-        "model_calls": result["model_calls"],
-        "planned_calls": result["planned_calls"],
-        "compactions": result["compactions"],
-        "coverage": result["coverage"],
-        "checkpoint_file": result["checkpoint_file"],
+        "status": status, "model": (workflow.get("route") or {}).get("model"),
+        "seconds": elapsed, "model_calls": result["model_calls"],
+        "tools_executed": len(tool_trace), "compactions": result["compactions"],
         "content_is_partial": result["content_is_partial"],
+        "parse_ok": result["parse_ok"], "report_summary": report_summary,
+        "timing": workflow.get("timing"), "tool_metrics": workflow.get("tool_metrics", {}),
+        "review_timing": workflow.get("review_timing"),
+        "coverage": {"indexed_materials": material_count, "read_observations": len(read_sources),
+                     "status": workflow["coverage"]["status"],
+                     "coverage_gap": workflow["coverage"]["coverage_gap"]},
         "uncompleted_reason": result["uncompleted_reason"],
-        "parse_ok": result["parse_ok"],
-        "report_summary": report_summary,
-        **diagnostic_files,
-        "report_diagnostics_warning": workflow.get("report_diagnostics_warning"),
-        "checkpoint_export_warning": workflow.get("checkpoint_export_warning"),
-        "checkpoint_session_directory": workflow.get("checkpoint_session_directory"),
-        "progress_warning_count": workflow.get("progress_warning_count", 0),
-        "progress_warning": workflow.get("progress_warning"),
-        "local_io_error_count": workflow.get("local_io_error_count", 0),
-        "local_io_error": workflow.get("local_io_error"),
-        "resume": workflow.get("resume"),
-        "recovery_events": workflow.get("recovery_events", []),
-        "timing": workflow.get("timing"),
+        "progress_warning_count": result["progress_warning_count"],
+        "local_io_error_count": result["local_io_error_count"],
+        "review_timing_warning": workflow.get("review_timing_warning"),
+        "record_metadata_warning": workflow.get("record_metadata_warning"),
     }
     report = "# 独立第三方代码审阅工作流\n\n"
     report += "工作流状态：`%s`。由主会话核实和裁决；失败、不完整或缺少报告不表示审阅通过。\n\n" % status
-    report += "## 工作流记录\n\n```json\n%s\n```\n\n" % json.dumps(meta, ensure_ascii=False, indent=2)
+    report += "## 摘要\n\n```json\n%s\n```\n\n" % json.dumps(meta, ensure_ascii=False, indent=2)
+    trace_links = [("workflow.json", "工作流"), ("result.json", "结果"), ("calls", "调用目录"),
+                   ("call_history.jsonl", "调用事件"), ("tool_results.jsonl", "工具原文"),
+                   ("material_delivery_index.json", "材料投递索引"), ("review_timing.jsonl", "本机计时")]
+    report += "完整追踪：" + "、".join("[%s](%s)" % (label, filename)
+                                        for filename, label in trace_links if (root / filename).exists()) + "。\n\n"
     if content:
         report += "## 最终可见报告\n\n"
         fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", content)), default=0))
@@ -446,19 +466,80 @@ class RuntimeRecords:
         self.label, self.key, self.workflow = label, key, workflow
         self.bundle, self.endpoint, self.progress_callback = inline_bundle, endpoint, progress_callback
         self.calls = {}
+        self.latest_candidates = []
         self.final_result = None
         self.tool_trace, self.read_sources = [], []
         self.last_progress = {}
         self.confirmed_inline = workflow.setdefault("confirmed_inline_ranges", [])
         self.recovery_waits = {}
         self.direct_request = direct_request
+        self.read_spans = {}
+        self.tool_metrics = {"read_requests": 0, "read_chars": 0,
+                             "repeated_read_chars": 0, "read_line_instances": 0,
+                             "execution_seconds": 0.0}
+        self.workflow["tool_metrics"] = self.tool_metrics
+        if not direct_request:
+            index_file = self.root / "material_delivery_index.json"
+            overflow = self.bundle.get("remaining_materials", [])
+            _write_json(index_file, self.safe({"overflow_materials": overflow}))
+            self.workflow.update(record_format_version=2,
+                                 material_delivery_index_file=str(index_file.resolve()),
+                                 inline_overflow_materials_count=len(overflow),
+                                 call_history_file=str((self.root / "call_history.jsonl").resolve()))
 
     def safe(self, value):
         return redact(value, self.key)
 
     def save_flow(self):
+        if self.direct_request:
+            return
+        # The official Session, per-call audit and append-only traces retain all
+        # history. A running checkpoint needs only the latest usable candidates.
+        snapshot = {key: value for key, value in self.workflow.items()
+                    if key not in {"_started_monotonic", "child_calls", "coverage", "inherited_read_sources"}}
+        children = self.workflow.get("child_calls", [])
+        snapshot["child_calls"] = self.latest_candidates
+        snapshot["child_calls_count"] = len(children)
+        snapshot["child_calls_are_latest_candidates"] = True
+        inherited = list(self.workflow.get("inherited_inline_delivered_ranges") or [])
+        for scope in self.confirmed_inline:
+            if scope not in inherited:
+                inherited.append(scope)
+        snapshot["inherited_inline_delivered_ranges"] = inherited
+        # Search/read observations are small source references. Retaining these
+        # keeps the existing resume reader compatible without replaying tools.
+        snapshot["coverage"] = {"read_sources": self.read_sources,
+                                "inline_delivered_ranges": self.confirmed_inline}
+        _write_json(self.root / "workflow.json", self.safe(snapshot))
+
+    def _record_call(self, call, event):
+        if self.direct_request:
+            return
+        metadata = self.safe(call["meta"])
+        try:
+            _write_json(call["directory"] / "audit.json", metadata)
+            _append_jsonl(self.root / "call_history.jsonl", {"event": event, **metadata})
+        except OSError as exc:
+            # These are lightweight mirrors. Request/result and the official
+            # Session remain authoritative; a new mirror cannot add a stop gate.
+            warning = "Call metadata mirror unavailable (%s); original attempt records remain available." % type(exc).__name__
+            self.workflow["record_metadata_warning"] = warning
+            call["meta"]["record_metadata_warning"] = warning
+
+    def record_timing(self, data):
+        """Host-clock facts only; no operational details enter model materials."""
+        value = self.safe(data)
+        self.workflow["review_timing"] = value
         if not self.direct_request:
-            _write_json(self.root / "workflow.json", self.safe(self.workflow))
+            try:
+                path = self.root / "review_timing.jsonl"
+                _append_jsonl(path, value)
+                self.workflow["review_timing_file"] = str(path.resolve())
+                self.save_flow()
+            except OSError as exc:
+                # The durable official Session owns the clock/reminder state.
+                # This lightweight operational sidecar must not interrupt it.
+                self.workflow["review_timing_warning"] = "Timing sidecar unavailable (%s); review continued." % type(exc).__name__
 
     def _progress(self, call, state, force=False):
         now = time.monotonic()
@@ -513,13 +594,15 @@ class RuntimeRecords:
         actual_inline = inline_ranges_in_request(data.get("payload") or {})
         call_meta.update(inline_material_ranges=actual_inline,
                          inline_estimated_tokens=None,
-                         inline_estimate_method="actual_wire_envelope_ranges",
-                         inline_overflow_materials=self.bundle.get("remaining_materials", []))
+                         inline_estimate_method="actual_wire_envelope_ranges")
+        if not self.direct_request:
+            call_meta["inline_overflow_materials_file"] = self.workflow["material_delivery_index_file"]
 
         call = {"id": ident, "directory": directory, "result": result, "meta": call_meta,
                 "started_monotonic": time.monotonic(), "visible_chars": 0, "audit": WireAudit(directory, self.key)}
         self.calls[ident] = call
         self.workflow["child_calls"].append(call_meta)
+        self.latest_candidates = [item for item in self.latest_candidates if item.get("stage") != stage] + [call_meta]
         self.workflow["status"] = "running"
         if stage == "compaction":
             self.workflow["compactions"] += 1
@@ -528,13 +611,17 @@ class RuntimeRecords:
             result["ledger_id"] = call["ledger_id"]
         except Exception as exc:
             result["ledger_warning"] = "Local call ledger unavailable (%s)." % type(exc).__name__
+        self._record_call(call, "request_start")
         self.save_flow()
         self._progress(call, "requesting", force=True)
         return {"recorded": True, "directory": str(directory.resolve())}
 
     def _ledger_metadata(self, result, directory):
         first = result.get("first_content_seconds")
-        first_utc = (datetime.fromisoformat(result["started_utc"]) + timedelta(seconds=first)).isoformat() if isinstance(first, (int, float)) else None
+        started = result["started_utc"]
+        # Node emits a terminal Z; Python 3.10's fromisoformat needs +00:00.
+        timestamp = started[:-1] + "+00:00" if started.endswith(("Z", "z")) else started
+        first_utc = (datetime.fromisoformat(timestamp) + timedelta(seconds=first)).isoformat() if isinstance(first, (int, float)) and not isinstance(first, bool) else None
         status = result.get("status", "error")
         return self.safe({"task": self.label[:120], "output_dir": str(directory.resolve()),
                           "requested_model": result.get("requested_model"), "reported_model": result.get("reported_model"),
@@ -617,6 +704,7 @@ class RuntimeRecords:
             result["ledger_warning"] = "Local call ledger finish unavailable (%s)." % type(exc).__name__
             _write_json(call["directory"] / "result.json", result)
         call["ended"] = True
+        self._record_call(call, "request_end")
         self.save_flow()
         return {"recorded": True}
 
@@ -628,7 +716,59 @@ class RuntimeRecords:
         text = "# Independent review request\n\nFailures and partial reports require host adjudication.\n\n```json\n" + json.dumps(metadata, ensure_ascii=False, indent=2) + "\n```\n\n" + fence + "text\n" + content + "\n" + fence + "\n"
         (directory / "report.md").write_text(text, encoding="utf-8")
 
+    def _observe_delivery(self, name, arguments, result):
+        if not isinstance(result, dict) or result.get("error"):
+            return
+        if name in {"batch_read", "batch_search"}:
+            for item in result.get("results") or []:
+                if isinstance(item, dict):
+                    self._observe_delivery(item.get("tool"), item.get("arguments") or {}, item.get("result"))
+            return
+        if name in {"read_material", "read_file"} and result.get("text"):
+            scope = {key: result.get(key) for key in (
+                "path", "source_id", "root", "view", "source_origin", "start_line", "end_line",
+                "line_numbers", "char_offset", "next_char_offset", "next_start_line", "complete") if key in result}
+            if isinstance(arguments, dict) and "char_offset" not in scope:
+                requested_line = arguments.get("start_line", 1)
+                returned_line = scope.get("start_line")
+                if returned_line is None and scope.get("line_numbers"):
+                    returned_line = scope["line_numbers"][0]
+                # MaterialStore normalizes a cursor at a line's end to the
+                # next line at offset zero. Record the delivered position,
+                # while the raw tool log retains the caller's original cursor.
+                advanced = isinstance(returned_line, int) and returned_line > requested_line
+                scope["char_offset"] = 0 if advanced else arguments.get("char_offset", 0)
+            self.read_sources.append(scope)
+            self.tool_metrics["read_requests"] += 1
+            text = result["text"]
+            self.tool_metrics["read_chars"] += len(text)
+            lines = result.get("line_numbers") or []
+            self.tool_metrics["read_line_instances"] += len(lines)
+            identity = tuple(result.get(key) for key in ("path", "source_id", "root", "view"))
+            # Track exact character intervals on each delivered source line;
+            # split pages of one long line are not falsely counted as rereads.
+            for index, (line, part) in enumerate(zip(lines, text.splitlines(keepends=True))):
+                start = scope.get("char_offset", 0) if index == 0 else 0
+                end = start + len(part)
+                spans = self.read_spans.setdefault((identity, line), [])
+                overlap = sum(max(0, min(end, right)-max(start, left)) for left, right in spans)
+                self.tool_metrics["repeated_read_chars"] += overlap
+                merged = []
+                for left, right in sorted(spans + [(start, end)]):
+                    if merged and left <= merged[-1][1]:
+                        merged[-1] = (merged[-1][0], max(right, merged[-1][1]))
+                    else:
+                        merged.append((left, right))
+                self.read_spans[(identity, line)] = merged
+        elif name in {"search_material", "search_code"}:
+            for match in result.get("matches") or []:
+                if isinstance(match, dict) and (match.get("text") or match.get("snippet")):
+                    self.read_sources.append({**{key: match.get(key) for key in (
+                        "path", "source_id", "root", "view", "line", "char_offset") if key in match},
+                        "access": "search_snippet"})
+
     def record_tool(self, store, params):
+        started = time.perf_counter()
         name = params.get("name")
         arguments = params.get("arguments", {})
         if isinstance(arguments, str):
@@ -644,20 +784,21 @@ class RuntimeRecords:
             except Exception as exc:
                 result = {"error": "Material read failed (%s)." % type(exc).__name__}
         result = self.safe(result)
-        with (self.root / "tool_results.jsonl").open("a", encoding="utf-8", newline="\n") as log:
-            log.write(_dump({"index": len(self.tool_trace)+1, "tool_call_id": params.get("callId"),
-                             "name": name, "arguments": self.safe(arguments), "result": result}) + "\n")
+        elapsed = max(0.0, time.perf_counter()-started)
+        before_reads = {key: self.tool_metrics[key] for key in ("read_requests", "read_chars", "repeated_read_chars")}
         is_error = isinstance(result, dict) and bool(result.get("error"))
-        self.tool_trace.append({"name": name, "scope": _scope_only(arguments), "status": "error" if is_error else "returned"})
-        if not is_error and isinstance(result, dict):
-            if name in {"read_material", "read_file"} and result.get("text"):
-                self.read_sources.append({key: result.get(key) for key in (
-                    "path", "source_id", "root", "view", "source_origin", "start_line", "end_line",
-                    "line_numbers", "char_offset", "next_char_offset", "next_start_line", "complete") if key in result})
-            elif name in {"search_material", "search_code"}:
-                for match in result.get("matches") or []:
-                    if isinstance(match, dict) and match.get("text"):
-                        self.read_sources.append({**{key: match.get(key) for key in ("path", "source_id", "root", "view", "line", "char_offset") if key in match}, "access": "search_snippet"})
+        if not is_error:
+            self._observe_delivery(name, arguments, result)
+        delivery = {key: self.tool_metrics[key] - value for key, value in before_reads.items()}
+        _append_jsonl(self.root / "tool_results.jsonl", {
+            "index": len(self.tool_trace)+1, "tool_call_id": params.get("callId"),
+            "name": name, "arguments": self.safe(arguments), "result": result,
+            "execution_seconds": elapsed, "delivery": delivery,
+        })
+        self.tool_trace.append({"name": name, "scope": _scope_only(arguments),
+                                "status": "error" if is_error else "returned",
+                                "execution_seconds": elapsed, "delivery": delivery})
+        self.tool_metrics["execution_seconds"] += elapsed
         self.workflow["tool_calls"] = len(self.tool_trace)
         self.save_flow()
         return result

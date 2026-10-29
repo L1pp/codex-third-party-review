@@ -289,7 +289,7 @@ class RepositorySourceTests(unittest.TestCase):
             source=self.source()
             self.assertEqual(len(source.packet['files']),20)
             self.assertEqual(writes.call_count,1)
-            diff_calls=[call for call in git_calls.call_args_list if '--function-context' in call.args[1]]
+            diff_calls=[call for call in git_calls.call_args_list if '--unified=3' in call.args[1]]
             self.assertEqual(len(diff_calls),1)
             for i in range(20):self.assertIn('after_%02d'%i,source.packet['diff'])
             for i in range(20):self.write('new-scan%02d.py'%i,'unmatched text\n')
@@ -383,7 +383,7 @@ class RepositorySourceTests(unittest.TestCase):
         self.write('app.py','changed_before_diff_failure = True\n')
         git=sources._run_git
         def fail_diff(root,args,**kwargs):
-            if '--function-context' in args:raise sources.RepositoryError('safe diff failure')
+            if '--unified=3' in args:raise sources.RepositoryError('safe diff failure')
             return git(root,args,**kwargs)
         with patch.object(sources,'_run_git',side_effect=fail_diff):
             with self.assertRaises(sources.RepositoryError):self.source()
@@ -431,6 +431,101 @@ class RepositorySourceTests(unittest.TestCase):
         self.assertIn('from app',page['text'])
         entry=next(item for item in source.execute('list_files',{})['entries'] if item['path']=='caller.py')
         self.assertEqual(entry['status'],'deleted')
+
+    def test_normal_diff_is_concise_and_full_function_stays_readable(self):
+        original = 'def long_function():\n' + ''.join('    value_%d = %d\n' % (i, i) for i in range(60))
+        self.write('long.py', original)
+        self.commit('long function baseline')
+        self.write('long.py', original.replace('value_50 = 50', 'value_50 = 500'))
+        source = self.source()
+        self.assertIn('+    value_50 = 500', source.packet['diff'])
+        self.assertNotIn('value_5 = 5', source.packet['diff'])
+        self.assertIn('value_5 = 5', source.execute('read_file', {'path': 'long.py'})['text'])
+
+    def test_selected_root_accepts_display_alias_without_switching_roots(self):
+        self.write('app.py', 'changed = True\n')
+        workspace = Path(self.temp.name) / 'workspace'; workspace.mkdir()
+        (workspace / 'external.py').write_text('workspace source\n', encoding='utf-8')
+        source = self.source(workspace_roots=[workspace])
+        self.assertEqual(source.execute('list_files', {'path': 'repo'})['files'],
+                         source.execute('list_files', {})['files'])
+        self.assertEqual(source.execute('read_file', {'path': 'repo/caller.py'})['text'],
+                         source.execute('read_file', {'path': 'caller.py'})['text'])
+        self.assertIn('workspace source', source.execute('read_file',
+                      {'root': 'workspace-1', 'path': 'workspace-1/external.py'})['text'])
+        self.assertIn('error', source.execute('read_file', {'root': 'repo', 'path': 'workspace-1/external.py'}))
+        for path in ['repo/../caller.py', 'repo/.env', 'repo/artifacts/record.json', '/repo/caller.py']:
+            with self.subTest(path=path):
+                self.assertIn('error', source.execute('read_file', {'path': path}))
+
+    def test_real_root_relative_directory_takes_precedence_over_alias(self):
+        self.write('app.py', 'outer = True\n')
+        self.write('repo/app.py', 'nested = True\n')
+        source = self.source()
+        self.assertEqual(source.execute('read_file', {'path': 'repo/app.py'})['text'], 'nested = True\n')
+        self.assertEqual(source.execute('read_file', {'path': 'app.py'})['text'], 'outer = True\n')
+
+    def test_repository_batch_keeps_selected_staged_and_deleted_views(self):
+        self.write('app.py', 'indexed = True\n'); self.git('add', 'app.py')
+        self.git('rm', 'caller.py')
+        self.write('app.py', 'dirty = True\n')
+        source = self.source(target='staged')
+        batch = source.execute('batch_read', {'requests': [
+            {'tool': 'read_file', 'arguments': {'path': 'repo/app.py', 'line_count': 1}},
+            {'tool': 'read_file', 'arguments': {'path': 'repo/caller.py@base', 'line_count': 1}},
+            {'tool': 'read_file', 'arguments': {'path': '../outside.py'}}]})
+        self.assertEqual(batch['results'][0]['result']['text'], 'indexed = True\n')
+        self.assertEqual(batch['results'][1]['result']['view'], 'base')
+        self.assertIn('from app', batch['results'][1]['result']['text'])
+        self.assertIn('error', batch['results'][2]['result'])
+        self.assertFalse(batch['has_more'])
+
+    def test_repository_batch_schema_matches_each_selected_leaf_contract(self):
+        self.write('app.py', 'value = calculate(1)\n')
+        source = self.source()
+        tools = {item['function']['name']: item['function']['parameters'] for item in source.tools()}
+        for batch, leaves in [('batch_read', {'read_material', 'read_file'}),
+                              ('batch_search', {'search_material', 'search_code'})]:
+            items = tools[batch]['properties']['requests']['items']
+            self.assertNotIn('type', items)  # Official oneOf forbids a sibling type.
+            branches = items['oneOf']
+            self.assertEqual({branch['properties']['tool']['enum'][0] for branch in branches}, leaves)
+            for branch in branches:
+                leaf = branch['properties']['tool']['enum'][0]
+                args = branch['properties']['arguments']
+                self.assertEqual(args, tools[leaf])
+                self.assertEqual('root' in args['properties'], leaf in {'read_file', 'search_code'})
+                self.assertEqual('offset' in args['properties'], leaf == 'search_code')
+        result = source.execute('batch_search', {'requests': [
+            {'tool': 'search_material', 'arguments': {'query': 'value', 'path': 'repo/app.py', 'limit': 1}},
+            {'tool': 'search_code', 'arguments': {'query': 'calculate', 'root': 'repo', 'offset': 1, 'limit': 1}}]})
+        first, second = [item['result'] for item in result['results']]
+        self.assertEqual(first['matches'][0]['path'], 'repo/app.py')
+        self.assertEqual(second['offset'], 1)
+        self.assertEqual(len(second['matches']), 1)
+        invalid = source.execute('batch_search', {'requests': [
+            {'tool': 'search_material', 'arguments': {'query': 'value', 'offset': 0}}]})
+        self.assertEqual(invalid['results'][0]['result']['error'], 'unknown argument')
+
+    def test_repository_batch_shares_search_scan_budget(self):
+        source = self.source()
+        names = ['candidate-%03d.py' % i for i in range(150)]
+        def capture(root, path):
+            return {'content': 'ordinary source\n', 'path': root + '/' + path, 'source_id': 'source-test', 'view': 'worktree'}
+        with patch.object(source, '_candidate_paths', return_value=names), patch.object(source, '_capture', side_effect=capture):
+            result = source.execute('batch_search', {'requests': [
+                {'tool': 'search_code', 'arguments': {'query': 'absent'}},
+                {'tool': 'search_code', 'arguments': {'query': 'another absent'}}]})
+        self.assertEqual(len(result['results']), 1)
+        self.assertEqual(result['results'][0]['result']['scanned_files'], sources.MAX_SEARCH_FILES)
+        self.assertEqual(result['results'][0]['result']['next_offset'], sources.MAX_SEARCH_FILES)
+        self.assertEqual(result['next_request_index'], 1)
+
+    def test_unindexed_material_hint_points_to_repository_tools(self):
+        source = self.source()
+        result = source.execute('search_material', {'path': 'rag_arch', 'query': 'needle'})
+        self.assertIn('search_code', result['error'])
+        self.assertIn('read_file', result['error'])
 
     def test_subdirectory_root_and_invalid_base_are_handled(self):
         sub=self.root/'nested';sub.mkdir()

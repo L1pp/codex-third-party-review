@@ -451,7 +451,7 @@ class RepositorySource(MaterialStore):
         if batch:
             batches.append(batch)
         for paths in batches:
-            data = _run_git(self.repo_root, ['diff', '--no-ext-diff', '--no-textconv', '--function-context', '-M']
+            data = _run_git(self.repo_root, ['diff', '--no-ext-diff', '--no-textconv', '--unified=3', '-M']
                             + self._change_args() + ['--'] + list(dict.fromkeys(paths))).stdout
             diffs.append(self._redact(data.decode('utf-8', errors='replace')))
         for relative in self._included_paths:
@@ -479,7 +479,7 @@ class RepositorySource(MaterialStore):
     def exploration_context(self):
         context = {'mode': 'repository', 'target': self.target,
                 'roots': [{'alias': alias, 'view': self._view(alias)} for alias in self.roots],
-                'instruction': 'Use list_files/read_file/search_code to investigate callers, contracts and tests within these roots. Initial inline material is not the whole repository. Known deleted repo files remain discoverable in list_files entries and read_file uses their selected baseline (view=base). First-read file contents are cached for this review; captures are not an atomic repository snapshot.',
+                'instruction': ('Review changes, directly affected callers/dependencies and related tests first; investigate farther only for a concrete unresolved contract or data-flow question. Finish when those questions are resolved; record evidence gaps rather than exploring unrelated directories. Use read_file/search_code for repository paths, read_material/search_material only for exact indexed identifiers such as @diff. Prefer batch_read/batch_search for independent targeted requests. Repository tools take root separately and a root-relative path (for example root=repo, path=src/app.py); root=repo, path="" lists the root. Existing root-relative names take precedence over root-prefixed display aliases. Initial inline material is not the whole repository. Known deleted files remain discoverable and read_file uses their selected baseline (view=base). First-read file contents are cached; captures are not an atomic repository snapshot.'),
                 'initial_changes': self._changes[:100], 'initial_changes_total': len(self._changes),
                 'omitted_initial_sources': self._skipped[:50], 'omitted_initial_sources_total': len(self._skipped)}
         if self._included_paths:
@@ -555,7 +555,7 @@ class RepositorySource(MaterialStore):
         return allowed
 
     def tools(self):
-        tools = super().tools()
+        tools = [tool for tool in super().tools() if tool['function']['name'] not in {'batch_read', 'batch_search'}]
         root = {'type': 'string', 'enum': list(self.roots), 'default': 'repo'}
         path = {'type': 'string', 'description': 'Root-relative file or directory path; no absolute paths or parent traversal.'}
         for name, description, properties, required in [
@@ -568,20 +568,42 @@ class RepositorySource(MaterialStore):
         ]:
             tools.append({'type': 'function', 'function': {'name': name, 'description': description,
                           'parameters': {'type': 'object', 'properties': properties, 'required': required, 'additionalProperties': False}}})
-        return tools
+        return self._with_batch_tools(tools)
 
-    def execute(self, name, arguments):
+    def execute(self, name, arguments, *, _batch_budget=None):
         self._manifest_batch_depth += 1
         try:
-            return self._execute(name, arguments)
+            return self._execute(name, arguments, _batch_budget=_batch_budget)
         finally:
             self._manifest_batch_depth -= 1
             if not self._manifest_batch_depth and self._manifest_dirty:
                 self._persist()
 
-    def _execute(self, name, arguments):
+    def _batch_search_limits(self):
+        return {'search_files': MAX_SEARCH_FILES, 'search_bytes': MAX_SEARCH_BYTES}
+
+    def _tool_path(self, root, path, *, allow_empty=False):
+        """Accept display aliases only within the already selected root.
+
+        Validate before removing a prefix, and prefer real root-relative names
+        so a source directory named ``repo`` remains addressable.
+        """
+        if not isinstance(root, str) or root not in self.roots:
+            raise RepositoryError('Unknown root alias')
+        relative = self._relative(path, allow_empty=allow_empty)
+        if relative == root or relative.startswith(root + '/'):
+            known = self._candidate_paths(root)
+            if any(item == relative or item.startswith(relative + '/') for item in known):
+                return relative
+            for capture in self._captures:
+                if capture['root'] == root and capture['path'] == relative:
+                    return capture['relative_path']
+            relative = relative[len(root):].lstrip('/')
+        return relative
+
+    def _execute(self, name, arguments, *, _batch_budget=None):
         if name not in {'list_files', 'read_file', 'search_code'}:
-            return super().execute(name, arguments)
+            return super().execute(name, arguments, _batch_budget=_batch_budget)
         args = self._arguments_object(arguments)
         if args is None:
             return self._error('arguments must be a JSON object')
@@ -590,19 +612,20 @@ class RepositorySource(MaterialStore):
             return self._error('unknown argument')
         root, path = args.get('root', 'repo'), args.get('path', '')
         try:
+            path = self._tool_path(root, path, allow_empty=name != 'read_file')
             relative, _ = self._check_path(root, path, allow_empty=name != 'read_file')
             if name == 'read_file':
                 capture = self._capture(root, relative)
                 request = {k: args[k] for k in ('start_line', 'line_count', 'char_offset') if k in args}
                 request['path'] = capture['material_path']
-                result = super().execute('read_material', request)
+                result = super().execute('read_material', request, _batch_budget=_batch_budget)
                 if 'error' not in result:
                     result.update(path=capture['path'], source_id=capture['source_id'], root=root, view=capture['view'])
                 return result
             offset, limit = args.get('offset', 0), args.get('limit', 50 if name == 'list_files' else 20)
             if not self._valid_int(offset) or not self._valid_int(limit, 1):
                 return self._error('offset and limit must be non-negative/positive integers')
-            limit = min(limit, 50 if name == 'list_files' else 20)
+            limit = min(limit, 50 if name == 'list_files' else (_batch_budget['matches'] if _batch_budget else 20))
             candidates = [p for p in self._candidate_paths(root) if not relative or p == relative or p.startswith(relative.rstrip('/') + '/')]
             if name == 'list_files':
                 end = min(offset + limit, len(candidates))
@@ -616,7 +639,9 @@ class RepositorySource(MaterialStore):
             if not isinstance(query, str) or not query or len(query) > 160:
                 return self._error('query must contain 1 through 160 characters')
             matches, cursor, scanned, byte_count, skipped = [], offset, 0, 0, 0
-            while cursor < len(candidates) and scanned < MAX_SEARCH_FILES and byte_count < MAX_SEARCH_BYTES and len(matches) < limit:
+            scan_limit = min(MAX_SEARCH_FILES, _batch_budget['search_files']) if _batch_budget else MAX_SEARCH_FILES
+            byte_limit = min(MAX_SEARCH_BYTES, _batch_budget['search_bytes']) if _batch_budget else MAX_SEARCH_BYTES
+            while cursor < len(candidates) and scanned < scan_limit and byte_count < byte_limit and len(matches) < limit:
                 filename = candidates[cursor]; cursor += 1; scanned += 1
                 try:
                     capture = self._capture(root, filename)
@@ -632,6 +657,9 @@ class RepositorySource(MaterialStore):
                     matches.append({'path': capture['path'], 'root': root, 'source_id': capture['source_id'], 'view': capture['view'],
                                     'line': line, 'line_numbers': [line], 'char_offset': position - line_start,
                                     'snippet': text[max(0, position-72):position+len(query)+72]})
+            if _batch_budget is not None:
+                _batch_budget['search_files'] -= scanned
+                _batch_budget['search_bytes'] -= byte_count
             self._persist()
             return {'root': root, 'matches': matches, 'offset': offset, 'next_offset': cursor if cursor < len(candidates) else None,
                     'has_more': cursor < len(candidates), 'scanned_files': scanned, 'skipped_files': skipped,

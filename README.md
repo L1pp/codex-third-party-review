@@ -184,6 +184,22 @@ Other useful settings:
 
 One review workflow may make multiple material-reading or compaction requests. Real requests consume your external service's quota or credits.
 
+### Review scope and clock reminders
+
+The default `standard` profile reviews changed behavior, direct callers/dependencies and relevant tests. It explores further when a concrete contract or data-flow concern needs evidence, and returns a report once the important checks and open concerns are resolved. Missing evidence belongs in `context_gaps`; reading every repository file is not a completion requirement. Use `--review-profile deep` for broader related checks. Both profiles keep repository tools and the configured model/reasoning strength.
+
+```json
+"review_policy": {
+  "profile": "standard",
+  "remind_after_seconds": 600,
+  "conclude_after_seconds": 1200
+}
+```
+
+The runtime calculates elapsed time from the local monotonic clock. Local wall-clock timestamps use the configured timezone, `Asia/Shanghai` by default. At a safe boundary before the next review step it sends one reminder after 10 minutes and one consolidation notice after 20 minutes. It does not interrupt an active response or split a tool batch. If both thresholds pass during one response, only the consolidation notice is needed. The model does not estimate time itself.
+
+**These notices are advisory:** they neither stop tools nor cancel a request, impose a round limit, or mark a long review failed. The reviewer may continue after 20 minutes. A disabled threshold is `0`; changing profiles does not change the two default thresholds. Native resume retains issued notices and elapsed active work up to the last persisted step checkpoint, excluding the shutdown/offline interval. An abrupt crash can lose uncheckpointed time from the in-flight response; these notices do not promise exact crash-time accounting. No per-round time message is added to model context. `review_timing.jsonl` and `review_timing` in the final result provide the host-clock record for observing real behavior.
+
 ## 4. Verify setup without calling a model
 
 Run these commands from the installed Skill root. No key is required. Inspect the current route, then simulate the two time periods:
@@ -216,7 +232,7 @@ Use $third-party-code-review to review this project's current changes. Automatic
 
 The main session gives the runtime the repository, target, short requirements, and any existing test-evidence file. It no longer needs to copy source into a review packet. The entry point automatically uses the Skill runtime; individual project interpreters need no extra dependencies.
 
-The reviewer can list files, search code, and read paginated text within the selected repository and any supplied workspace roots. These tools remain available even for a small change that was fully inlined. The runtime records the content actually read as numbered source versions; subsequent reads reuse that version. Review-time reads do not execute commands, modify code, or run tests. The main session remains responsible for changes and testing under the host project's and platform's permission rules.
+The reviewer can list files, search code, and read paginated text within the selected repository and any supplied workspace roots. These tools remain available even for a small change that was fully inlined. `batch_read` and `batch_search` combine related requests under the same per-response acquisition bounds. Initial diffs use normal three-line context; complete functions remain available on demand. The runtime records the content actually read as numbered source versions; subsequent reads reuse that version. Review-time reads do not execute commands, modify code, or run tests. The main session remains responsible for changes and testing under the host project's and platform's permission rules.
 
 `allow_implicit_invocation=true` permits Codex to match the Skill automatically; **installation does not guarantee a review after every development task**. To request a review by default in a project, add a rule such as the following to that project's `AGENTS.md`. Installation does not modify global instructions:
 
@@ -260,8 +276,9 @@ The terminal prints the absolute output directory. It contains:
 
 | File | Purpose |
 | --- | --- |
-| `report.md`, `result.json`, `workflow.json` | Original visible report, parsed result, workflow completion and context records |
-| `calls/` | Individual request, response-stream, available reasoning, and timing records |
+| `report.md`, `result.json`, `workflow.json` | Compact visible report with links to full request records, parsed result, workflow completion and context records |
+| `calls/`, `call_history.jsonl` | Individual complete requests, response streams, available reasoning, compact call history and timing records |
+| `material_delivery_index.json`, `review_timing.jsonl` | Shared delivery index and advisory host-clock events; private local records |
 | `sources/index.json`, `sources/source-0001.txt`, ... | Numbered local source records, including files scanned by a search that returned no match |
 | `report_diagnostics.json` | Derived field, location, and evidence checks, plus the recovered report candidate and repair log; the original report is preserved |
 | `adjudication.json` | Main-session decisions, initially pending; not an automatic approval |

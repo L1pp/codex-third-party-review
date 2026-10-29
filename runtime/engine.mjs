@@ -14,6 +14,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import ToolRuntime, { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools';
 import * as OfficialRetry from '@deepseek-ai/dsh-llm-retry';
 import { generationAllowance } from './adapter.mjs';
+import { ReviewPolicy } from './review_policy.mjs';
 
 const PROVIDER = 'review';
 const schemaBounds = new Set(['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
@@ -102,6 +103,7 @@ export async function runEngine(spec, host, { adapter, persistencePlugin, contex
   const maxCalls = explicitCount(spec, 'max_model_calls');
   const maxCompactions = explicitCount(spec, 'max_compactions');
   const now = typeof host.now === 'function' ? host.now : () => performance.now();
+  const policy = new ReviewPolicy(spec.reviewPolicy ?? spec.review_policy ?? {}, host.reviewClock);
   const ctx = new Context();
   const previousBeforeRequest = host.beforeRequest;
   const previousHostRequest = host.request;
@@ -201,6 +203,8 @@ export async function runEngine(spec, host, { adapter, persistencePlugin, contex
         const finish = lastAssistantStreamChunk(event.data.stream, 'finish')?.reason.kind;
         if (finish !== 'tool-calls' && visibleText(event).trim()) retainedReport = event;
       }
+      const timingStage = policy.observe(event);
+      if (timingStage) notify('review.timing', { ...policy.snapshot(), event: timingStage });
       if (event.type === 'turn/end') lastTurn = event;
       if (event.type === 'tool/call') toolCalls++;
     });
@@ -277,6 +281,16 @@ export async function runEngine(spec, host, { adapter, persistencePlugin, contex
         await context?.continueLength?.(owner, { attempt: lastAssistant, signal, turn });
       }
     });
+    // The official pre-step boundary runs after the entire previous tool batch.
+    // It admits the notice into the next real request, and never wakes a new
+    // turn, interrupts a stream, or creates a request merely to show the clock.
+    ctx.on('agent/pre-step', async ({ agent: owner, signal }, next) => {
+      const decision = await next();
+      if (owner.id !== spec.sessionId || signal.aborted || host.signal?.aborted || decision.kind !== 'enter') return decision;
+      policy.checkpoint(owner.session);
+      const notice = policy.notice();
+      return notice ? { ...decision, messages: [...decision.messages, notice] } : decision;
+    });
     await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 });
     const options = {
       provider: PROVIDER, model: spec.route.model,
@@ -290,6 +304,8 @@ export async function runEngine(spec, host, { adapter, persistencePlugin, contex
       agent = await ctx.agentLoop.create(SessionId(spec.sessionId), options,
         { cwd: spec.cwd ?? process.cwd() });
     }
+    policy.restore(agent.session.log);
+    notify('review.timing', { ...policy.checkpoint(agent.session), event: 'started' });
     if (host.signal?.aborted) {
       return { status: 'interrupted', sessionId: spec.sessionId, finalContent: '', content: '',
         modelCalls: admittedCalls, toolsExecuted: toolCalls, sessionDirectory: join(spec.outputDir, 'engine-session') };
@@ -320,6 +336,8 @@ export async function runEngine(spec, host, { adapter, persistencePlugin, contex
     if (typeof content !== 'string' || !content.trim()) throw new TypeError('Review task content must be non-empty');
     agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: content }] }));
     await agent.whenIdle();
+    const reviewTiming = policy.checkpoint(agent.session);
+    notify('review.timing', { ...reviewTiming, event: 'finished' });
     await ctx.sessionPersistence.flush();
     const finishReason = lastTurn?.data.reason ?? { kind: 'error', error: { code: 'NO_TURN_RESULT', message: 'No committed turn result' } };
     const kind = finishReason.kind;
@@ -330,7 +348,7 @@ export async function runEngine(spec, host, { adapter, persistencePlugin, contex
       status, sessionId: spec.sessionId, finishReason, finalContent, content: finalContent,
       partialContent: attemptText(lastAttempt), modelCalls: admittedCalls, requestAttempts: attempts, toolsExecuted: toolCalls,
       compactionCalls, ...(configuredLimit ? { uncompletedReason: configuredLimit } : {}),
-      checkpointRecoveries, retryWaitSeconds: retryWaitMs / 1000,
+      checkpointRecoveries, retryWaitSeconds: retryWaitMs / 1000, reviewTiming,
       sessionDirectory: join(spec.outputDir, 'engine-session'),
       ...(notificationWarning ? { notificationWarning } : {}),
     };

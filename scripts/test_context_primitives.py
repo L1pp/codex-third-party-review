@@ -241,7 +241,7 @@ class MaterialStoreTests(unittest.TestCase):
     def test_tool_schemas_and_argument_allowlist(self):
         store = MaterialStore({"files": []})
         schemas = store.tools()
-        self.assertEqual([item["function"]["name"] for item in schemas], ["list_materials", "read_material", "search_material"])
+        self.assertEqual([item["function"]["name"] for item in schemas], ["list_materials", "read_material", "search_material", "batch_read", "batch_search"])
         self.assertIn("error", store.execute("list_materials", {"offset": 0, "extra": "ignored?"}))
         self.assertIn("error", store.execute("unknown", {}))
 
@@ -277,6 +277,21 @@ class MaterialStoreTests(unittest.TestCase):
         self.assertFalse(result["needs_tools"])
         self.assertEqual(result["remaining_materials"], [])
         self.assertEqual((packet, store._packet), (before, before))
+
+    def test_exhausted_inline_budget_keeps_cursors_without_tokenizing_overflow(self):
+        overflow = "NEVER_ENCODE_THIS_OVERFLOW" * 100
+        store = MaterialStore({"diff": "1234", "files": [{"path": "later.py", "content": overflow}]})
+        def counter(text, model):
+            self.assertNotIn("NEVER_ENCODE", text)
+            return len(text)
+        result = store.inline_materials(token_budget=6, counter=counter)
+        self.assertEqual(result["materials"][0]["text"], "1234")
+        self.assertEqual(result["estimated_tokens"], 6)
+        self.assertEqual(result["remaining_materials"], [{
+            "path": "later.py", "kind": "file", "cursor": {"start_line": 1, "char_offset": 0},
+            "remaining_chars": len(overflow)}])
+        self.assertEqual(store.execute("read_material", {"path": "later.py"})["text"], overflow)
+        self.assertFalse(result["fully_inlined"])
 
     def test_inline_materials_prioritizes_metadata_diff_then_files_across_overflow(self):
         packet = {

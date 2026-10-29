@@ -66,6 +66,8 @@ The initial bundle prefers approximately **100,000 locally estimated material to
 
 The live Node meter uses the same local DeepSeek tokenizer JSON and chat template through Hugging Face's tokenizer/Jinja implementations, pricing the actual OpenAI payload projection, reasoning replay, tool schemas, and tool calls. Auto remains an explicitly marked conservative estimate. Local counts are not provider `usage` guarantees.
 
+For verified tokenizer assets, an in-memory bounded cache reuses exact encodings between AddedToken boundaries. Unfamiliar normalization/whitespace rules fall back to full native encoding. This reduces repeated work while retaining the same rendered template and counts; it does not replace boundary checks with a usage-only approximation.
+
 The meter is the sole source for official BasicCompactionEngine pressure, region selection, pruning, and summary replacement. Successful usage may anchor a same-route, same-canonical-header estimate; route/tool-schema changes require repricing. OpenAI/Bailian `prompt_tokens` already includes cache reads, so the adapter splits non-overlapping usage buckets before passing them to Harness.
 
 Default DeepSeek settings remain a **1,000,000-token window**, **256,000 output tokens**, and **max** reasoning effort. Auto retains the configured combined output assumption of **393,216 tokens**. The official pressure policy reserves the complete output plus 65,536 headroom and checks the smaller of 80% of the window or the remaining input room. For the default DeepSeek route this is 678,464 input tokens. Headroom already includes the local safety allowance.
@@ -73,6 +75,14 @@ Default DeepSeek settings remain a **1,000,000-token window**, **256,000 output 
 Under pressure, the official pruner can shorten older tool-result text, followed by official region compaction when needed. Replacements preserve balanced tool history and durable session events. The summarizer reuses the conversation prefix and appends a review-specific checkpoint instruction; it retains findings, evidence locations, actual read ranges, uncertainty, and unfinished work. A complete framed summary must reduce the replaced region before commit. Truncated or failed summaries do not replace usable history.
 
 The runtime does not interrupt an active stream to insert compaction. Review-specific extensions retain `length` continuation and received-progress recovery after transient stream/deadline errors. These are task policies over the official services, not a second loop or pressure calculator.
+
+## Scope and advisory local clocks
+
+`review_policy.profile` selects change-directed `standard` review or explicit `deep` related exploration. Both retain read-only tools and fixed provider settings. The completion contract asks the reviewer to settle concrete concerns and return findings/context gaps rather than pursue directory coverage. Repository diffs use ordinary hunk context; batch read/search tools share existing acquisition bounds and preserve each delivered source/cursor.
+
+`runtime/review_policy.mjs` uses the local monotonic clock for active elapsed duration and the local wall clock for timezone-labelled timestamps. Official `agent/pre-step` is the boundary after a completed tool batch and before the next request. At 600/1200 seconds it appends one durable reminder/consolidation user message respectively; a single response crossing both thresholds receives the stronger notice. No active stream is interrupted, no tool permission changes, no count cap or deadline is introduced, and the model may continue. The notices do not establish completion or failure.
+
+Log-only official plugin records retain active elapsed work and issued stages up to the last natural step checkpoint for cold resume; offline gaps are excluded. An abrupt crash can lose the subsequent uncheckpointed in-flight duration. This advisory policy does not claim exact crash-time accounting. The runtime does not parse untrusted source/model text as timing authority. Routine clock checkpoints stay outside model context. Host events persist into `review_timing.jsonl` and the final `review_timing` summary. Missing cooperative behavior is measured from real later usage rather than enforced by more retries or a stopping mechanism.
 
 ## Failure recovery and resume
 
@@ -86,7 +96,7 @@ New engine-session cold recovery is exercised at the CLI boundary, including mis
 
 ## Records, diagnostics, and decisions
 
-Each actual attempt has its own `calls/` directory with request, response metadata, received SSE/raw text, reasoning where available, usage, and status. `tool_results.jsonl` records original local deliveries before context replacements. `engine-session/` holds the canonical durable agent session, while `checkpoint.txt` and `checkpoints/` are compatible derived exports. `workflow.json`, `result.json`, and `report.md` summarize the run; detailed operational records remain local and never become routine model instructions.
+Each actual attempt has its own `calls/` directory with request, response metadata, received SSE/raw text, reasoning where available, usage, and status. `tool_results.jsonl` records original local deliveries before context replacements. `engine-session/` holds the canonical durable agent session, while `checkpoint.txt` and `checkpoints/` are compatible derived exports. `call_history.jsonl` and per-call audit metadata retain compact request history; a shared `material_delivery_index.json` avoids duplicating the same overflow index for each attempt. Progress snapshots keep recovery candidates without repeatedly serializing all historical calls; final workflow/result files retain the compact full call list. `report.md` shows the final visible report and links to detailed records. `workflow.json` and `result.json` summarize the run; detailed operational records remain local and never become routine model instructions.
 
 The host observer applies active-key redaction across stream boundaries and keeps safe request IDs/rate headers. Raw evidence can still contain code or private paths and must remain private. A logging or progress warning is distinct from a model/provider failure.
 

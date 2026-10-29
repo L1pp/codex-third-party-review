@@ -358,7 +358,7 @@ class MaterialStore:
         inline_items = []
         delivered_ranges = []
         remaining_materials = []
-        methods = []
+        methods = [context_count["method"]]
         warnings = []
         inline_chars = 0
         inline_lines = 0
@@ -366,6 +366,15 @@ class MaterialStore:
 
         for material in ordered:
             content = material["content"]
+            if not remaining_budget and content:
+                # Keep an exact overflow cursor without encoding text that
+                # cannot be admitted. Empty files retain an inline marker.
+                rest = {"path": material["path"], "kind": material["kind"],
+                        "cursor": {"start_line": 1, "char_offset": 0}, "remaining_chars": len(content)}
+                if material.get("source_field"):
+                    rest["source_field"] = material["source_field"]
+                remaining_materials.append(rest)
+                continue
             full_count = count_text(content)
             method = full_count["method"]
             if method not in methods:
@@ -448,7 +457,8 @@ class MaterialStore:
 
     def tools(self):
         """OpenAI function-tool schemas for the bounded in-memory reader."""
-        return [
+        repository = bool(getattr(self, "exploration_enabled", False))
+        tools = [
             {
                 "type": "function",
                 "function": {
@@ -468,7 +478,7 @@ class MaterialStore:
                 "type": "function",
                 "function": {
                     "name": "read_material",
-                    "description": "从材料索引读取一段快照内容；使用返回的游标继续分页。",
+                    "description": "Read one exact material-index identifier (including @diff); use its cursor for more." + (" For repository files absent from the index use read_file." if repository else ""),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -486,7 +496,7 @@ class MaterialStore:
                 "type": "function",
                 "function": {
                     "name": "search_material",
-                    "description": "在已索引材料中按字面文本搜索，并返回有限的位置片段。",
+                    "description": "Search exact indexed materials by literal text; path is a material identifier, not a directory." + (" Use search_code for repository paths outside the index." if repository else ""),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -500,6 +510,68 @@ class MaterialStore:
                 },
             },
         ]
+        return self._with_batch_tools(tools)
+
+    def _with_batch_tools(self, tools):
+        """Reuse each advertised leaf contract instead of widening arguments.
+
+        Official Harness requires at least two oneOf alternatives; a packet
+        with only one leaf uses that exact object schema directly.
+        """
+        parameters = {item["function"]["name"]: item["function"]["parameters"] for item in tools}
+        for name, leaves in [("batch_read", ("read_material", "read_file")),
+                             ("batch_search", ("search_material", "search_code"))]:
+            branches = [{"type": "object", "properties": {
+                            "tool": {"type": "string", "enum": [leaf]},
+                            "arguments": parameters[leaf]},
+                         "required": ["tool", "arguments"], "additionalProperties": False}
+                        for leaf in leaves if leaf in parameters]
+            items = {"oneOf": branches} if len(branches) > 1 else branches[0]
+            tools.append({"type": "function", "function": {
+                "name": name,
+                "description": ("Run independent read/search requests together. Each request names a tool and its normal arguments. "
+                                "The whole batch shares one normal response budget; request short relevant ranges. "
+                                "Use each result's cursor for its remaining content, and next_request_index for unprocessed requests."),
+                "parameters": {"type": "object", "properties": {
+                    "requests": {"type": "array", "minItems": 1, "maxItems": 20, "items": items}},
+                               "required": ["requests"], "additionalProperties": False}}})
+        return tools
+
+    def _missing_material(self):
+        message = "path is not in the material index; use an exact identifier from list_materials"
+        if getattr(self, "exploration_enabled", False):
+            message += "; for repository files or directories use read_file or search_code with root-relative paths"
+        return self._error(message)
+
+    def _batch(self, name, args):
+        requests = args.get("requests")
+        if set(args) - {"requests"} or not isinstance(requests, list) or not 1 <= len(requests) <= 20:
+            return self._error("requests must contain 1 through 20 independent tool requests")
+        allowed = {"read_material"} if name == "batch_read" else {"search_material"}
+        if getattr(self, "exploration_enabled", False):
+            allowed.add("read_file" if name == "batch_read" else "search_code")
+        budget = {"chars": self.max_chars, "lines": self.max_lines, "matches": 20}
+        if getattr(self, "exploration_enabled", False):
+            budget.update(self._batch_search_limits())
+        results = []
+        for index, request in enumerate(requests):
+            if not isinstance(request, dict) or set(request) - {"tool", "arguments"} or not isinstance(request.get("tool"), str) or request.get("tool") not in allowed:
+                results.append({"index": index, "result": self._error("request must name an allowed read/search tool")})
+                continue
+            tool = request["tool"]
+            if (name == "batch_read" and (budget["chars"] <= 0 or budget["lines"] <= 0)
+                    or name == "batch_search" and budget["matches"] <= 0
+                    or tool == "search_code" and (budget["search_files"] <= 0 or budget["search_bytes"] <= 0)):
+                break
+            result = self.execute(tool, request.get("arguments"), _batch_budget=budget)
+            results.append({"index": index, "tool": tool, "arguments": request.get("arguments"), "result": result})
+            budget["chars"] -= len(result.get("text", ""))
+            budget["lines"] -= len(result.get("line_numbers", []))
+            budget["matches"] -= len(result.get("matches", []))
+        next_index = len(results)
+        return {"results": results, "has_more": next_index < len(requests),
+                "next_request_index": next_index if next_index < len(requests) else None,
+                "total_requests": len(requests)}
 
     @staticmethod
     def _error(message):
@@ -526,11 +598,14 @@ class MaterialStore:
                 return material
         return None
 
-    def execute(self, name, arguments):
+    def execute(self, name, arguments, *, _batch_budget=None):
         """Execute one allowlisted tool against this instance's memory only."""
         args = self._arguments_object(arguments)
         if args is None:
             return self._error("arguments must be a JSON object")
+
+        if name in {"batch_read", "batch_search"}:
+            return self._batch(name, args)
 
         if name == "list_materials":
             if set(args) - {"offset", "limit"}:
@@ -553,7 +628,7 @@ class MaterialStore:
                 return self._error("unknown argument")
             material = self._find(args.get("path"))
             if material is None:
-                return self._error("path is not in the material index")
+                return self._missing_material()
             start_line = args.get("start_line", 1)
             requested_lines = args.get("line_count", self.max_lines)
             char_offset = args.get("char_offset", 0)
@@ -592,12 +667,12 @@ class MaterialStore:
                         "next_start_line": None, "next_char_offset": None,
                     }
 
-            line_limit = min(requested_lines, self.max_lines)
+            line_limit = min(requested_lines, self.max_lines, _batch_budget["lines"] if _batch_budget else self.max_lines)
             cursor_index = index
             cursor_offset = char_offset
             parts = []
             line_numbers = []
-            chars_left = self.max_chars
+            chars_left = min(self.max_chars, _batch_budget["chars"]) if _batch_budget else self.max_chars
             included_lines = 0
             has_more = False
 
@@ -648,11 +723,11 @@ class MaterialStore:
                 return self._error("query is too long")
             path = args.get("path")
             if path is not None and self._find(path) is None:
-                return self._error("path is not in the material index")
+                return self._missing_material()
             limit = args.get("limit", 20)
             if not self._valid_int(limit, 1):
                 return self._error("limit must be a positive integer")
-            limit = min(limit, 20)
+            limit = min(limit, 20, _batch_budget["matches"] if _batch_budget else 20)
 
             matches = []
             has_more = False

@@ -285,6 +285,7 @@ def main(argv=None):
     parser.add_argument("--test-evidence", type=Path, help="Existing test evidence file; never runs tests")
     parser.add_argument("--output-dir", type=Path, help="New output directory; repo mode defaults to Skill logs/reviews/<UTC time>")
     parser.add_argument("--quiet-progress", action="store_true", help="Suppress periodic stderr status; stdout remains one JSON summary")
+    parser.add_argument("--review-profile", choices=("standard", "deep"), help="Review change impact by default, or opt into deeper related exploration; both use advisory clock reminders")
     parser.add_argument("--task", help="Short task title only; never pass credentials or source code here")
     parser.add_argument("--limit", type=int, default=20, help="History rows, 1 through 1000")
     parser.add_argument("--outcome", choices=("all", "success", "failure", "running"), default="all")
@@ -315,6 +316,8 @@ def main(argv=None):
         parser.error("--base is only used with --target range")
     try:
         config = prepare_config(read_json(args.config), args.config)
+        if args.review_profile is not None:
+            config["review_policy"] = dict(config.get("review_policy") or {}, profile=args.review_profile)
         if args.history:
             print(json.dumps(ledger.history(ledger_path(config), limit=args.limit, outcome=args.outcome, slowest=args.slowest), ensure_ascii=False, indent=2))
             return 0
@@ -383,7 +386,7 @@ def main(argv=None):
         )
         if progress_reporter is not None:
             progress_reporter.finish(result)
-        summary = {name: result.get(name) for name in ("status", "route", "completion_warning", "parse_ok", "parse_warning", "seconds", "usage", "usage_missing", "response_log_files", "response_log_warning", "ledger_id", "ledger_warning", "workflow_status", "model_calls", "compactions", "report_diagnostics_file", "adjudication_file", "progress_warning", "progress_warning_count", "local_io_error", "local_io_error_count", "timing")}
+        summary = {name: result.get(name) for name in ("status", "route", "completion_warning", "parse_ok", "parse_warning", "seconds", "usage", "usage_missing", "response_log_files", "response_log_warning", "ledger_id", "ledger_warning", "workflow_status", "model_calls", "compactions", "report_diagnostics_file", "adjudication_file", "progress_warning", "progress_warning_count", "local_io_error", "local_io_error_count", "timing", "review_timing")}
         summary["output_dir"] = str(args.output_dir.resolve())
         print(json.dumps(summary, ensure_ascii=False))
         return 0 if result["status"] in ("completed", "dry_run") else 1

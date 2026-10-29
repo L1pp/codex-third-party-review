@@ -43,5 +43,10 @@
     "headroom_tokens": 65536,
     "retain_recent_ratio": 0.16
   },
-  "model_catalog_file": "assets/bailian_catalog_cache.json"
+  "model_catalog_file": "assets/bailian_catalog_cache.json",
+  "review_policy": {
+    "profile": "standard",
+    "remind_after_seconds": 600,
+    "conclude_after_seconds": 1200
+  }
 }

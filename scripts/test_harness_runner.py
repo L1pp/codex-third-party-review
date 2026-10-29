@@ -82,6 +82,23 @@ class HostTests(unittest.TestCase):
         self.launch = launch
         return result
 
+    def test_clock_notices_are_host_records_and_do_not_create_requests(self):
+        timing={"event":"conclude", "profile":"standard", "elapsed_seconds":1201, "notified_stages":["remind","conclude"]}
+        messages=[event("review.timing",timing),
+                  req("start","requestStart",{"id":"r1","payload":{"model":"auto","messages":[]},"route":ROUTE}),
+                  req("end","requestEnd",{"id":"r1","status":"completed","content":REPORT,"seconds":0.1,"finish_reason":"stop"}),
+                  event("engine.complete",{"status":"completed","sessionId":"s","finalContent":REPORT,"finishReason":"completed","reviewTiming":timing})]
+        result=self.execute(messages)
+        self.assertEqual(result["status"],"completed")
+        self.assertEqual(result["model_calls"],1)
+        self.assertEqual(result["review_timing"]["elapsed_seconds"],1201)
+        self.assertEqual(json.loads((self.out/"review_timing.jsonl").read_text(encoding="utf-8")),timing)
+        sent=[json.loads(raw) for raw in self.session.stdin.saved.splitlines()]
+        policy=sent[0]["spec"]["reviewPolicy"]
+        self.assertEqual(policy["remind_after_seconds"],600)
+        self.assertEqual(policy["conclude_after_seconds"],1200)
+        self.assertGreaterEqual(policy["initial_elapsed_seconds"],0)
+
     def test_engine_startup_error_keeps_its_safe_diagnostic_without_an_api_call(self):
         message="Session format is newer than this runtime " + KEY
         result=self.execute([event("engine.complete",{"status":"error","error_type":"SessionFormatError","error_message":message,"finalContent":"","finishReason":None})])

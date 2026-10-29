@@ -7,6 +7,7 @@ import { LlmAdapter, createUserMessage, resolveRetryPolicy } from '@deepseek-ai/
 import Persistence from './persistence.mjs';
 import { projectToolSchema, runEngine } from './engine.mjs';
 import { mountContext } from './context.mjs';
+import { assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools';
 
 const tool = { type: 'function', function: {
   name: 'read_material', description: 'Read one supplied snapshot, within its line bounds.',
@@ -338,4 +339,137 @@ test('real official checkpoint recovery permits more than three successful compa
 test('auto with thinking disabled reserves only the actual body allowance',async t=>{
   const f=await fixture(t,()=>report(),{spec:{route:{model:'auto',max_tokens:131072,thinking_budget:262144,combined_output_limit_parameter:'max_completion_tokens',enable_thinking:false,context_window_tokens:1000000}}});
   const result=await f.run();assert.equal(result.status,'completed');assert.equal(f.adapter.requests[0].maxTokens,131072);
+});
+
+test('host clock notices reach the next complete tool step once and never stop further tools', async t => {
+  let elapsed = 0;
+  const twoReads = label => {
+    const first = readTool(`${label}-one`), second = readTool(`${label}-two`);
+    return [...first.slice(0, -1), ...second.slice(0, -1).map(chunk => ({ ...chunk, index: 1 })), first.at(-1)];
+  };
+  const f = await fixture(t, (_options, call) => {
+    if (call <= 4) { elapsed = call * 650000; return twoReads(`batch-${call}`); }
+    return report();
+  }, { host: { reviewClock: { monotonic: () => elapsed, wall: () => Date.UTC(2026, 9, 29, 14) + elapsed } } });
+  const result = await f.run();
+  assert.equal(result.status, 'completed'); assert.equal(result.modelCalls, 5); assert.equal(result.toolsExecuted, 8);
+  const notices = request => request.messages.filter(message => message.source?.kind === 'review-runtime-clock');
+  assert.equal(notices(f.adapter.requests[0]).length, 0);
+  assert.equal(notices(f.adapter.requests[1]).length, 1);
+  assert.equal(notices(f.adapter.requests[1])[0].source.stage, 'remind');
+  assert.equal(f.adapter.requests[1].messages.filter(message => message.role === 'tool').length, 2);
+  assert.equal(notices(f.adapter.requests[2]).length, 2);
+  assert.equal(notices(f.adapter.requests[2])[1].source.stage, 'conclude');
+  assert.equal(notices(f.adapter.requests.at(-1)).length, 2);
+  assert.deepEqual(result.reviewTiming.notified_stages, ['remind', 'conclude']);
+  assert.ok(result.reviewTiming.elapsed_seconds > 1200);
+  assert.deepEqual(f.notifications.filter(row => row.type === 'review.timing').map(row => row.data.event), ['started', 'remind', 'conclude', 'finished']);
+  assert.equal(f.adapter.requests.at(-1).maxTokens, 256000);
+});
+
+test('clock checkpoints do not grow model history before a reminder or wake a completed turn', async t => {
+  let elapsed = 0;
+  const f = await fixture(t, (_options, call) => {
+    elapsed += call === 3 ? 1300000 : 1000;
+    return call < 3 ? readTool(`untimed-${call}`) : report();
+  }, { host: { reviewClock: { monotonic: () => elapsed, wall: () => Date.UTC(2026, 9, 29) } } });
+  const result = await f.run();
+  assert.equal(result.status, 'completed'); assert.equal(result.modelCalls, 3);
+  for (const request of f.adapter.requests) assert.equal(request.messages.filter(message => message.role === 'user').length, 1);
+  assert.deepEqual(result.reviewTiming.notified_stages, []);
+  assert.ok(result.reviewTiming.elapsed_seconds > 1200);
+  const events = (await readFile(join(result.sessionDirectory, 'session.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.ok(events.filter(event => event.type === 'plugin:review/timing').length >= 4);
+});
+
+test('native resume retains active clock progress and committed reminders without counting shutdown', async t => {
+  let elapsed = 0;
+  const first = await fixture(t, (_options, call) => {
+    elapsed = call * 650000;
+    return call === 1 ? readTool('before-restart') : report();
+  }, { host: { reviewClock: { monotonic: () => elapsed, wall: () => Date.UTC(2026, 9, 29) + elapsed } } });
+  const previous = await first.run();
+  assert.deepEqual(previous.reviewTiming.notified_stages, ['remind']);
+  const next = await fixture(t, () => report(), { host: {
+    reviewClock: { monotonic: () => 0, wall: () => Date.UTC(2026, 10, 30) },
+  }, spec: { reviewPolicy: { initial_elapsed_seconds: 5, resume_elapsed_seconds: 100 } } });
+  const result = await next.run({ resume: { sourceDirectory: previous.sessionDirectory, sessionId: first.spec.sessionId } });
+  assert.equal(result.status, 'completed'); assert.equal(result.modelCalls, 1);
+  assert.equal(result.reviewTiming.elapsed_seconds, 1305);
+  assert.deepEqual(result.reviewTiming.notified_stages, ['remind', 'conclude']);
+  const visible = next.adapter.requests[0].messages.filter(message => message.source?.kind === 'review-runtime-clock');
+  assert.deepEqual(visible.map(message => message.source.stage), ['remind', 'conclude']);
+});
+
+test('cancellation after a long response does not inject a clock notice or issue another request', async t => {
+  let elapsed = 0;
+  const controller = new AbortController();
+  const f = await fixture(t, () => {
+    elapsed = 1500000;
+    controller.abort();
+    return readTool('cancelled-long-call');
+  }, { host: { signal: controller.signal,
+    reviewClock: { monotonic: () => elapsed, wall: () => Date.UTC(2026, 9, 29) + elapsed } } });
+  const result = await f.run();
+  assert.equal(result.status, 'interrupted'); assert.equal(f.adapter.requests.length, 1);
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(f.notifications.filter(row => row.type === 'review.timing' && ['remind', 'conclude'].includes(row.data.event)), []);
+});
+
+
+test('a final report crossing either clock threshold remains the only request and retains its exact report', async t => {
+  for (const seconds of [650, 1250]) {
+    await t.test(String(seconds), async t => {
+      let elapsed = 0;
+      const expected = '{"findings":[{"issue":"keep this original report"}],"context_gaps":[]}';
+      const f = await fixture(t, () => { elapsed = seconds * 1000; return report(expected); }, {
+        host: { reviewClock: { monotonic: () => elapsed, wall: () => Date.UTC(2026, 9, 29) + elapsed } },
+      });
+      const result = await f.run();
+      assert.equal(result.status, 'completed');
+      assert.equal(result.modelCalls, 1); assert.equal(f.adapter.requests.length, 1);
+      assert.equal(result.finalContent, expected);
+      assert.equal(result.reviewTiming.elapsed_seconds, seconds);
+      assert.deepEqual(result.reviewTiming.notified_stages, []);
+      assert.deepEqual(f.notifications.filter(row => row.type === 'review.timing').map(row => row.data.event), ['started', 'finished']);
+    });
+  }
+});
+
+test('a genuine max-token followup receives an elapsed reminder without a timer-created turn', async t => {
+  let elapsed = 0, recoveries = 0;
+  const f = await fixture(t, (_options, call) => {
+    if (call === 1) { elapsed = 1250000; return [...report('partial report').slice(0, -1), { type: 'finish', reason: { kind: 'max-tokens' } }]; }
+    return report('completed after real recovery');
+  }, { host: { reviewClock: { monotonic: () => elapsed, wall: () => Date.UTC(2026, 9, 29) + elapsed } },
+    contextPlugin: async () => ({ async continueLength(agent) {
+      recoveries++;
+      agent.followup(createUserMessage({ source: { kind: 'review-continuation' }, content: [{ type: 'text', text: 'A real length recovery followup.' }] }));
+    } }),
+  });
+  const result = await f.run();
+  assert.equal(result.status, 'completed'); assert.equal(result.modelCalls, 2);
+  assert.equal(recoveries, 1); assert.equal(result.finalContent, 'completed after real recovery');
+  assert.deepEqual(result.reviewTiming.notified_stages, ['conclude']);
+  assert.ok(f.adapter.requests[1].messages.some(message => message.source?.kind === 'review-continuation'));
+  assert.ok(f.adapter.requests[1].messages.some(message => message.source?.kind === 'review-runtime-clock'));
+});
+
+
+test('official tool projection preserves disjoint batch leaf contracts', () => {
+  const branch = (name, properties) => ({ type: 'object', properties: {
+    tool: { type: 'string', enum: [name] },
+    arguments: { type: 'object', properties, required: ['query'], additionalProperties: false },
+  }, required: ['tool', 'arguments'], additionalProperties: false });
+  const schema = projectToolSchema({ type: 'object', properties: {
+    requests: { type: 'array', minItems: 1, maxItems: 20, items: { oneOf: [
+      branch('search_material', { query: { type: 'string', minLength: 1 } }),
+      branch('search_code', { query: { type: 'string', minLength: 1 }, offset: { type: 'integer', minimum: 0 } }),
+    ] } },
+  }, required: ['requests'], additionalProperties: false });
+  assert.doesNotThrow(() => assertSupportedJsonSchema(schema));
+  const payload = (tool, args) => ({ requests: [{ tool, arguments: args }] });
+  assert.deepEqual(validateJsonSchemaValue(schema, payload('search_code', { query: 'needle', offset: 100 })), []);
+  assert.deepEqual(validateJsonSchemaValue(schema, payload('search_material', { query: 'needle' })), []);
+  assert.ok(validateJsonSchemaValue(schema, payload('search_material', { query: 'needle', offset: 0 })).length);
 });

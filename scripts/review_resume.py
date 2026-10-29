@@ -458,8 +458,8 @@ class ResumedRepositorySource(RepositorySource):
             self._persist()
         return capture
 
-    def _execute(self, name, arguments):
-        result = super()._execute(name, arguments)
+    def _execute(self, name, arguments, *, _batch_budget=None):
+        result = super()._execute(name, arguments, _batch_budget=_batch_budget)
         if not isinstance(result, dict):
             return result
         captures = {c["source_id"]: c for c in self._captures}

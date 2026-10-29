@@ -322,6 +322,26 @@ class ReviewResumeTests(unittest.TestCase):
         indexed = next(i for i in source.index() if i["path"] == "repo/helper.py")
         self.assertEqual(indexed["source_origin"], "restored_capture")
 
+    def test_resumed_batches_keep_old_and_new_source_identity(self):
+        self.write("helper.py", "dirty = 999\n")
+        self.write("other.py", "current = 2\n")
+        source = self.restore()
+        result = source.execute("batch_read", {"requests": [
+            {"tool": "read_material", "arguments": {"path": "repo/helper.py", "line_count": 1}},
+            {"tool": "read_file", "arguments": {"path": "repo/other.py", "line_count": 1}}]})
+        restored, fresh = [item["result"] for item in result["results"]]
+        self.assertEqual(restored["text"], "value = 1\r\n")
+        self.assertEqual(restored["source_id"], "source-0002")
+        self.assertEqual(restored["source_origin"], "restored_capture")
+        self.assertEqual(fresh["text"], "current = 2\n")
+        self.assertEqual(fresh["source_origin"], "new_after_resume")
+        searches = source.execute("batch_search", {"requests": [
+            {"tool": "search_material", "arguments": {"path": "repo/helper.py", "query": "preserved"}},
+            {"tool": "search_code", "arguments": {"path": "other.py", "query": "current"}}]})
+        first, second = [item["result"]["matches"][0] for item in searches["results"]]
+        self.assertEqual(first["source_origin"], "restored_capture")
+        self.assertEqual(second["source_origin"], "new_after_resume")
+
     def test_credential_and_explicit_exclusions_remain_active(self):
         self.write("config.py", "api_key = 'configured-key'\n")
         self.write(".env", "PRIVATE=1\n")

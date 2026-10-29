@@ -74,3 +74,9 @@ engine-session/
 session-header.json
 session.jsonl
 writer.lock
+
+# Private compact runtime audit and clock records
+call_history.jsonl
+review_timing.jsonl
+material_delivery_index.json
+audit.json

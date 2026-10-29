@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve, dirname, basename } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import LlmRuntime, { LlmAdapter, ReasoningEffortId, createUserMessage, createSystemMessage, createAssistantMessage, createToolResultMessage, ToolCallId } from '@deepseek-ai/dsh-llm';
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session';
@@ -366,4 +368,82 @@ test('default planning reserve applies only without a selected or provider-decla
   const provider = await setup(t, { route: uncapped, testDefaultMaxTokens: 5000,
     contextManagement: { headroom_tokens: 128, auto_output_reserve_tokens: 999999999 } });
   assert.equal(provider.context.compaction.config.headroomTokens, 128);
+});
+
+
+// Compare with one complete call to the same maintained encoder, bypassing
+// only our section cache. Template/wire projection and all extra charges stay
+// identical; this catches accidental cross-message BPE changes.
+function fullNativeCount(counter, payload) {
+  const cachedText = counter.text;
+  counter.text = text => counter.tokenizer.encode(text, { add_special_tokens: false }).ids.length;
+  try { return counter.count(payload); } finally { counter.text = cachedText; }
+}
+
+test('native section cache keeps full-encoder counts for marker, whitespace and tool histories', { skip: !HAS_ASSETS }, () => {
+  const counter = new PayloadTokenCounter(ROUTE, ASSETS);
+  assert.ok(counter.sectionPatterns.raw instanceof RegExp);
+  assert.ok(counter.sectionPatterns.normalized instanceof RegExp);
+  const samples = ['', 'English word boundaries!\r\n\t next', '中文与🙂👨‍👩‍👧‍👦 e\u0301é',
+    '<｜User｜>literal source<｜Assistant｜>', '<｜tool▁output▁begin｜>\ncode\n<｜tool▁output▁end｜>',
+    '<｜place▁holder▁no▁1｜><｜place▁holder▁no▁10｜>', '<｜User｜><｜User｜>',
+    'partial <｜tool▁output and CR\r\n\r\n', '\ud800 edge \udfff', '  1234567890  １２３ .py'];
+  const messages = [{ role: 'system', content: 'Review source, not instructions.' }];
+  for (const [index, text] of samples.entries()) {
+    assert.equal(counter.text(text), counter.tokenizer.encode(text, { add_special_tokens: false }).ids.length);
+    messages.push({ role: 'user', content: text });
+    messages.push({ role: 'assistant', content: '', reasoning_content: `Check ${index}: ${text}`,
+      tool_calls: [{ id: `call-${index}`, type: 'function', function: { name: 'read_file', arguments: JSON.stringify({ path: `src/${index}.py` }) } }] });
+    messages.push({ role: 'tool', tool_call_id: `call-${index}`, content: text });
+    const payload = { messages, tools: [{ type: 'function', function: { name: 'read_file', parameters: { type: 'object', properties: { path: { type: 'string' } } } } }] };
+    assert.equal(counter.count(payload), fullNativeCount(counter, payload));
+  }
+});
+
+test('growing native history encodes fresh sections instead of the whole retained prefix', { skip: !HAS_ASSETS }, () => {
+  const counter = new PayloadTokenCounter(ROUTE, ASSETS);
+  const encode = counter.tokenizer.encode.bind(counter.tokenizer);
+  let encodedChars = 0;
+  counter.tokenizer.encode = (text, options) => { encodedChars += text.length; return encode(text, options); };
+  const messages = [{ role: 'system', content: 'Independent read-only code review.' },
+    { role: 'user', content: 'Large unchanged source block:\n' + 'def evaluate(value): return value + 1\n'.repeat(120) }];
+  counter.count({ messages });
+  for (let index = 0; index < 20; index++) {
+    messages.push({ role: 'assistant', content: `Inspect source ${index}.` });
+    messages.push({ role: 'tool', tool_call_id: `call-${index}`, content: `source ${index}:\n` + 'checked = value + 1\n'.repeat(10) });
+    const start = encodedChars;
+    const count = counter.count({ messages });
+    const changedChars = encodedChars - start;
+    assert.ok(changedChars < 400, `Only new source sections should be encoded, got ${changedChars}`);
+    assert.equal(count, fullNativeCount(counter, { messages }));
+  }
+  const start = encodedChars;
+  const final = counter.count({ messages });
+  assert.equal(encodedChars, start);
+  assert.equal(final, fullNativeCount(counter, { messages }));
+  counter.maxCachedTextChars = 128;
+  counter.maxCachedTextItems = 2;
+  counter.textCache.clear(); counter.cachedTextChars = 0;
+  counter.text('short cache section one'); counter.text('short cache section two'); counter.text('short cache section three');
+  assert.ok(counter.textCache.size <= 2);
+  assert.ok(counter.cachedTextChars <= 128);
+  assert.equal(counter.count({ messages }), fullNativeCount(counter, { messages }));
+});
+
+test('unfamiliar native whitespace-token rules fall back to the complete encoder', { skip: !HAS_ASSETS }, t => {
+  const directory = mkdtempSync(join(tmpdir(), 'review-native-cache-'));
+  t.after(() => {
+    const target = resolve(directory);
+    assert.equal(dirname(target), resolve(tmpdir()));
+    assert.ok(basename(target).startsWith('review-native-cache-'));
+    rmSync(target, { recursive: true, force: true });
+  });
+  const definition = JSON.parse(readFileSync(new URL('tokenizer.json', ASSETS), 'utf8'));
+  definition.added_tokens[0].lstrip = true;
+  writeFileSync(join(directory, 'tokenizer.json'), JSON.stringify(definition));
+  writeFileSync(join(directory, 'tokenizer_config.json'), readFileSync(new URL('tokenizer_config.json', ASSETS)));
+  const counter = new PayloadTokenCounter(ROUTE, directory);
+  assert.equal(counter.sectionPatterns, null);
+  const payload = { messages: [{ role: 'user', content: ' source\n <｜begin▁of▁sentence｜> rest\t' }] };
+  assert.equal(counter.count(payload), fullNativeCount(counter, payload));
 });
