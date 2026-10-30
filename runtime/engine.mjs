@@ -323,7 +323,7 @@ export async function runEngine(spec, host, { adapter, persistencePlugin, contex
     }
     let content = spec.initialUserContent;
     if (spec.resume) {
-      const continuation = spec.resume.continuePrompt ?? 'Continue the same independent review from its recorded progress, verify unresolved evidence and return the final report.';
+      const continuation = spec.resume.continuePrompt ?? 'Continue this same code review from its recorded progress. Verify remaining high-impact trigger, call-chain or contract questions; hand off evidence-backed lower-risk uncertainty to the main session. Do not repeat resolved checks or manually replay passing tests. Return the findings and context gaps once the necessary evidence is sufficient.';
       if (typeof content === 'string' && content.trim()) {
         try {
           const prepared = JSON.parse(content);

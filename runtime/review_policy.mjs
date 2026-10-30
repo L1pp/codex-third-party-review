@@ -106,8 +106,8 @@ export class ReviewPolicy {
       ? 'Keep deeper checks tied to concrete unresolved contracts or data-flow evidence.'
       : 'Focus on the changed behavior, direct callers/dependencies and relevant tests; extend further for a concrete unresolved concern.';
     const guidance = stage === 'conclude'
-      ? 'Consolidate the evidence already collected and work toward the final report. Continue any useful tools or checks you judge necessary; unresolved evidence can be stated in context_gaps.'
-      : 'Review the evidence collected so far, prioritize unresolved consequential concerns and work toward a report once those checks are sufficient.';
+      ? 'Consolidate the issues already found and concrete unresolved concerns into the final report. Prioritize any remaining high-impact evidence checks; hand evidence-backed lower-risk uncertainty to the main session rather than repeatedly trying to eliminate every false positive or manually replay passing tests. Useful tools and checks remain available.'
+      : 'Prioritize delivering the issues already found and concrete unresolved concerns. Verify consequential triggers and call chains; hand lower-risk uncertainty to the main session instead of repeatedly rechecking settled candidates. Inspect passing tests for a concrete coverage concern rather than manually replaying every case.';
     const text = `Runtime timing notice from the local host clock: ${Math.floor(state.elapsed_seconds)} seconds of active review have elapsed. `
       + `Local time: ${state.local_time} (${state.timezone}). ${guidance} ${scope} `
       + 'This is a soft reminder only, with no time, tool-call or round limit. The runtime calculates elapsed time; do not estimate time yourself.';

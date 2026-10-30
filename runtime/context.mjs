@@ -11,7 +11,7 @@ import { BlockAssembler, LlmError, ReasoningEffortId, assembleAssistantStream, c
 import { Session, ToolCallRecovery, headerEquals } from '@deepseek-ai/dsh-session';
 import { buildPayload, generationAllowance } from './adapter.mjs';
 
-const CONTINUE = 'Continue checking the unresolved code-review items against the available read-only sources, then return the final review report.';
+const CONTINUE = 'Continue this same code review from its recorded progress. Verify remaining high-impact trigger, call-chain or contract questions; hand off evidence-backed lower-risk uncertainty to the main session. Do not repeat resolved checks or manually replay passing tests. Return the findings and context gaps once the necessary evidence is sufficient.';
 const SUMMARY_DIRECTIVE = 'Condense this same independent code review into a short continuation checkpoint. Preserve concrete findings, evidence paths and ranges, actually delivered source identities and ranges, distinguishing delivery from completed review, unresolved checks and uncertainty. Do not conduct a new review, invent conclusions, copy entire source files, include operational logs, or call tools. Keep any prior checkpoint facts that remain relevant. Output only the checkpoint text.';
 const textBlocks = blocks => (blocks || []).filter(block => block.type === 'text' || block.type === 'reasoning').map(block => block.text).join('\n');
 const asUser = (text, kind = 'review-progress') => createUserMessage({ content: [{ type: 'text', text }], source: { kind } });

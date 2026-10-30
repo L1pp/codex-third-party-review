@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A Codex Skill for supplementary, repository-aware code review through an external model API.
 
-Your main GPT session supplies the project, review target, requirements, and existing test evidence. The runtime collects the initial changes, and an external model can explore the repository through read-only tools before returning findings. The main session verifies those findings and decides what to change. Use it for code, tests, dependencies, migrations, and configuration that affects runtime behavior. Documentation-only changes and read-only queries are skipped by default.
+Your main GPT session supplies the project, review target, requirements, and existing test evidence. The runtime collects the initial changes, and an external model can explore the repository through read-only tools before returning findings. The reviewer prioritizes finding problems and handing off evidence-backed uncertainties; it deeply checks high-impact concerns and avoids repeatedly disproving lower-risk doubts or manually replaying passing tests. The main session verifies those findings and decides what to change. Use it for code, tests, dependencies, migrations, and configuration that affects runtime behavior. Documentation-only changes and read-only queries are skipped by default.
 
 This Skill does not change Codex's main model configuration. A completed report is not proof of full coverage or an approval to merge.
 
